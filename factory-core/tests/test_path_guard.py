@@ -113,6 +113,16 @@ def test_relative_symlink_inside_worktree_is_blocked(nested_cwd, seal):
     assert denied(bash("ls vendor/demo-repo"))
 
 
+def test_dotdot_after_symlink_is_resolved_from_the_symlink_target(nested_cwd, seal):
+    (nested_cwd / "vendor").symlink_to(seal / "demo-repo", target_is_directory=True)
+    allowed, reason = evaluate_payload({
+        "tool_name": "Write",
+        "cwd": str(nested_cwd),
+        "tool_input": {"file_path": "vendor/../new.py"},
+    })
+    assert not allowed and "hold-out" in reason
+
+
 # --- shell command inspection ---------------------------------------------------
 
 @pytest.mark.parametrize("command", [
@@ -132,6 +142,21 @@ def test_relative_symlink_inside_worktree_is_blocked(nested_cwd, seal):
 ])
 def test_holdout_references_in_commands_are_blocked(seal, command):
     assert denied(bash(command))
+
+
+@pytest.mark.parametrize("argument", ["'work tree'/new.py", r"work\ tree/new.py"])
+@pytest.mark.parametrize("alias_points_into_seal", [False, True])
+def test_shell_parses_space_in_path_after_redirection(nested_cwd, seal, argument, alias_points_into_seal):
+    alias = nested_cwd / "work tree"
+    if alias_points_into_seal:
+        alias.symlink_to(seal, target_is_directory=True)
+    else:
+        alias.mkdir()
+
+    allowed, reason = evaluate_payload(bash(f"printf '%s' '# text' >{argument}"))
+    assert allowed is not alias_points_into_seal
+    if alias_points_into_seal:
+        assert "hold-out" in reason
 
 
 def test_glob_expanding_into_seal_is_blocked(home, seal, monkeypatch):
@@ -239,6 +264,28 @@ def test_cli_deny_writes_stderr_and_stdout_json_with_exit_2(repo, seal):
     assert body["reason"] == result.stderr.strip()
 
 
+@pytest.mark.parametrize(("target", "label"), [
+    ("~/.factory-holdouts/new.py", "hold-out"),
+    ("/var/run/docker.sock", "Docker socket"),
+    ("src/../.git/hooks/pre-commit", "Git hooks directory"),
+])
+def test_cli_denies_native_patch_move_target_on_both_output_streams(repo, seal, target, label):
+    command = (
+        f"*** Begin Patch\n*** Update File: src/app.py\n*** Move to: {target}\n"
+        "@@\n-VALUE = 1\n+VALUE = 2\n*** End Patch\n"
+    )
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "cwd": str(repo),
+               "tool_input": {"command": command}}
+
+    result = run_cli(["guard"], cwd=repo, stdin=json.dumps(payload))
+
+    assert result.returncode == 2
+    diagnostic, = result.stderr.splitlines()
+    assert diagnostic.startswith("BLOCKED by Factory Security Guard:")
+    assert target in diagnostic and label in diagnostic
+    assert json.loads(result.stdout) == {"decision": "deny", "reason": diagnostic}
+
+
 def test_cli_traversal_from_nested_directory(nested_cwd):
     payload = json.dumps(bash("cat ../../.factory-holdouts/test.py"))
     result = run_cli(["guard"], cwd=nested_cwd, stdin=payload)
@@ -258,4 +305,6 @@ def test_cli_allow(repo):
 def test_malformed_payload_fails_closed(repo, stdin):
     result = run_cli(["guard"], cwd=repo, stdin=stdin)
     assert result.returncode == 2
-    assert json.loads(result.stdout)["decision"] == "deny"
+    diagnostic, = result.stderr.splitlines()
+    assert "Malformed hook payload" in diagnostic
+    assert json.loads(result.stdout) == {"decision": "deny", "reason": diagnostic}

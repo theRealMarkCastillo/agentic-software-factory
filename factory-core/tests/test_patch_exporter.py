@@ -72,6 +72,56 @@ def test_works_from_a_linked_worktree(repo):
     assert export_patch(worktree).files == ["src/feature.py"]
 
 
+def test_linked_worktree_exports_unstaged_binary_bytes_without_changing_either_index(repo):
+    original = repo / "asset.bin"
+    original.write_bytes(b"\0original\xff")
+    git(repo, "add", "asset.bin")
+    git(repo, "commit", "-qm", "Add binary asset")
+    worktree = repo / ".worktrees" / "binary"
+    git(repo, "worktree", "add", "-q", "--detach", str(worktree), "HEAD")
+
+    binary = worktree / "asset.bin"
+    binary.write_bytes(b"\0staged\xff")
+    git(worktree, "add", "asset.bin")
+    binary.write_bytes(b"\0unstaged\xff")
+    (worktree / "src" / "untracked.bin").write_bytes(b"\0new\xff")
+    (repo / "README.md").write_text("staged in the primary checkout\n")
+    git(repo, "add", "README.md")
+    indexes = [
+        path / git(path, "rev-parse", "--git-path", "index")
+        for path in (repo, worktree)
+    ]
+    before = [index.read_bytes() for index in indexes]
+
+    patch = export_patch(worktree)
+
+    assert patch.files == ["asset.bin", "src/untracked.bin"]
+    assert [index.read_bytes() for index in indexes] == before
+    assert git(worktree, "status", "--porcelain").splitlines() == ["MM asset.bin", "?? src/untracked.bin"]
+    sut = compose_runner.prepare_sut(worktree, patch.data)
+    try:
+        assert (sut / "asset.bin").read_bytes() == b"\0unstaged\xff"
+        assert (sut / "src" / "untracked.bin").read_bytes() == b"\0new\xff"
+        assert (sut / "README.md").read_text() == "demo\n"
+    finally:
+        shutil.rmtree(sut, ignore_errors=True)
+
+
+def test_exports_untracked_symlink_as_a_link(repo, tmp_path):
+    target = tmp_path / "outside.bin"
+    target.write_bytes(b"\0outside the checkout\xff")
+    (repo / "asset-link").symlink_to(target)
+
+    patch = export_patch(repo)
+
+    assert patch.files == ["asset-link"]
+    sut = compose_runner.prepare_sut(repo, patch.data)
+    try:
+        assert os.readlink(sut / "asset-link") == str(target)
+    finally:
+        shutil.rmtree(sut, ignore_errors=True)
+
+
 def test_patch_reproduces_the_working_tree(changed):
     patch = export_patch(changed)
     sut = compose_runner.prepare_sut(changed, patch.data)
