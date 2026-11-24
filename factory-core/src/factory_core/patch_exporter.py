@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
-import uuid
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import INTERNAL_FILES, FactoryError, run
+from .common import INTERNAL_FILES, FactoryError, run, runtime_tmp_dir
 
 
 @dataclass
@@ -18,7 +19,9 @@ class CandidatePatch:
 
 def export_patch(repo: str | Path) -> CandidatePatch:
     """Build the patch through a temporary index, leaving the real index untouched."""
-    index_path = f"/tmp/idx-{uuid.uuid4()}"
+    idx_dir = Path(tempfile.mkdtemp(prefix="idx-", dir=runtime_tmp_dir()))
+    os.chmod(idx_dir, 0o700)
+    index_path = str(idx_dir / "index")
     env = {**os.environ, "GIT_INDEX_FILE": index_path}
 
     def git_bytes(*args: str) -> bytes:
@@ -39,10 +42,6 @@ def export_patch(repo: str | Path) -> CandidatePatch:
         data = git_bytes("diff", "--cached", "--binary", *diff_flags, "HEAD")
         names = git_bytes("diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD")
     finally:
-        for path in (index_path, f"{index_path}.lock"):
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
+        shutil.rmtree(idx_dir, ignore_errors=True)
     files = [n.decode(errors="surrogateescape") for n in names.split(b"\0") if n]
     return CandidatePatch(data=data, files=files)

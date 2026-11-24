@@ -110,8 +110,10 @@ def render_compact(data: dict[str, Any]) -> str:
     if not data.get("initialized"):
         return ""
     lines = [
-        f"[factory state] task={data['task_id']} branch={data['branch']} "
-        f"attempts={data['attempts']}/{data['max_retries']} verification={data['verification']}",
+        (
+            f"[factory state] task={data['task_id']} branch={data['branch']} "
+            f"attempts={data['attempts']}/{data['max_retries']} verification={data['verification']}"
+        ),
     ]
     if data["circuit_breaker_tripped"]:
         lines.append("Circuit breaker tripped: stop retrying and hand control back to the human operator.")

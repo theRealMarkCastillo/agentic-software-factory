@@ -5,10 +5,10 @@ import subprocess
 import sys
 
 import pytest
-
-from factory_core import mcp_server, state_manager as sm, telemetry, worktree
-
 from conftest import REPO_ROOT
+
+from factory_core import mcp_server, telemetry, worktree
+from factory_core import state_manager as sm
 
 TOOL_NAMES = {"factory_status", "factory_plan_read", "factory_rejected_approaches", "factory_telemetry_summary"}
 
@@ -120,6 +120,14 @@ def test_repo_path_argument_works_when_mcp_server_runs_from_plugin_dir(repo, hom
     assert data["content"] == "external plan"
     denied_res, text = call("factory_plan_read", {"repo_path": str(seal)})
     assert denied_res["isError"] is True and "hold-out" in text
+
+    (plugin_root / "plugin.json").write_text('{"name": "demo"}')
+    no_arg_res, no_arg_text = call("factory_status")
+    assert no_arg_res["isError"] is True and "plugin directory" in no_arg_text
+
+    monkeypatch.setenv("FACTORY_REPO_PATH", str(repo))
+    env_res, env_data = call("factory_plan_read", {"task_id": "task-ext"})
+    assert env_res["isError"] is False and env_data["content"] == "external plan"
 
 
 @pytest.mark.parametrize("task_id", ["../../etc", "/etc/passwd", "a/b", "", 7, "~/.factory-holdouts"])

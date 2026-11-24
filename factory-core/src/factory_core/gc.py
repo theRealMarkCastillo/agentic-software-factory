@@ -5,6 +5,7 @@ Worktrees with uncommitted changes are never removed.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -14,7 +15,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .common import INTERNAL_FILES, STATE_FILE, TRIAGE_FILE, WORKTREES_DIR, FactoryError, main_repo_root, run
+from . import state_manager
+from .common import (
+    STATE_FILE,
+    TRIAGE_FILE,
+    WORKTREES_DIR,
+    FactoryError,
+    main_repo_root,
+    porcelain_paths,
+    run,
+    runtime_tmp_dir,
+)
 
 DEFAULT_MAX_AGE_DAYS = 14
 # Resources younger than this may belong to a gate that is still starting.
@@ -42,10 +53,8 @@ def _tree_size(path: Path) -> int:
     total = 0
     for base, _dirs, files in os.walk(path, onerror=lambda _e: None):
         for name in files:
-            try:
+            with contextlib.suppress(OSError):
                 total += os.lstat(os.path.join(base, name)).st_size
-            except OSError:
-                pass
     return total
 
 
@@ -59,13 +68,10 @@ def _format_bytes(count: int) -> str:
 
 
 def _is_dirty(path: Path) -> bool:
-    proc = run(["git", "status", "--porcelain"], cwd=path)
-    if proc.returncode != 0:
+    paths = porcelain_paths(path, include_internal=False)
+    if paths is None:
         return True  # Unknown state is treated as unsafe to delete.
-    for line in proc.stdout.decode(errors="replace").splitlines():
-        if line[3:].strip('"') not in INTERNAL_FILES:
-            return True
-    return False
+    return bool(paths)
 
 
 def _activity_files(path: Path) -> list[Path]:
@@ -81,23 +87,35 @@ def _activity_files(path: Path) -> list[Path]:
 def _last_activity(path: Path) -> float:
     times = []
     for candidate in _activity_files(path):
-        try:
+        with contextlib.suppress(OSError):
             times.append(candidate.stat().st_mtime)
-        except OSError:
-            pass
     return max(times, default=0.0)
 
 
 def _is_merged(main_root: Path, path: Path) -> bool:
-    """Merged means the gate has evaluated the worktree and its tip is contained in the main checkout."""
-    state = path / STATE_FILE
+    """Merged means the gate verified this exact worktree after commits were made, and its tip is in main."""
     try:
-        if '"last_evaluated_sha": null' in state.read_text():
-            return False
-    except OSError:
+        state = state_manager.load_state(path)
+    except FactoryError:
+        return False
+    if not state:
+        return False
+    verified_hash = state.get("verified_tree_hash")
+    last_sha = state.get("last_evaluated_sha")
+    if not isinstance(verified_hash, str) or not verified_hash or not isinstance(last_sha, str) or not last_sha:
         return False
     tip = run(["git", "rev-parse", "HEAD"], cwd=path).stdout.decode().strip()
-    if not tip:
+    if not tip or tip != last_sha:
+        return False
+    try:
+        if state_manager.compute_tree_hash(path) != verified_hash:
+            return False
+    except FactoryError:
+        return False
+    reflog_shas = [
+        sha for sha in run(["git", "log", "-g", "--format=%H", "HEAD"], cwd=path).stdout.decode().splitlines() if sha
+    ]
+    if reflog_shas and len(set(reflog_shas)) < 2:
         return False
     return run(["git", "merge-base", "--is-ancestor", tip, "HEAD"], cwd=main_root).returncode == 0
 
@@ -231,18 +249,24 @@ def _gc_triage(main_root: Path, max_age_days: float, report: Report) -> None:
 def _gc_temp(report: Report) -> None:
     now = time.time()
     uid = os.getuid()
-    for pattern in ("sut-*", "idx-*"):
-        for path in Path("/tmp").glob(pattern):
-            try:
-                info = path.lstat()
-            except OSError:
-                continue
-            if info.st_uid != uid or now - info.st_mtime < TEMP_MAX_AGE_SECONDS:
-                continue
-            report.reclaimed_bytes += _tree_size(path) if path.is_dir() else info.st_size
-            report.temp_dirs.append(str(path))
-            if not report.dry_run:
-                shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
+    seen: set[Path] = set()
+    for base_dir in (runtime_tmp_dir(), Path("/tmp")):
+        resolved_base = base_dir.resolve()
+        if resolved_base in seen or not base_dir.is_dir():
+            continue
+        seen.add(resolved_base)
+        for pattern in ("sut-*", "idx-*"):
+            for path in base_dir.glob(pattern):
+                try:
+                    info = path.lstat()
+                except OSError:
+                    continue
+                if info.st_uid != uid or now - info.st_mtime < TEMP_MAX_AGE_SECONDS:
+                    continue
+                report.reclaimed_bytes += _tree_size(path) if path.is_dir() else info.st_size
+                report.temp_dirs.append(str(path))
+                if not report.dry_run:
+                    shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
 
 
 def collect(dry_run: bool = False, max_age_days: float = DEFAULT_MAX_AGE_DAYS, repo: str | Path | None = None) -> Report:

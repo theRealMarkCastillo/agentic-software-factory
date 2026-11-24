@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, TextIO
 
 from . import __version__, path_guard, status, telemetry
 from .common import PLAN_FILE, WORKTREES_DIR, FactoryError, holdout_dir, main_repo_root, worktree_root
@@ -31,6 +32,14 @@ _TASK_ARG = {
 }
 
 
+def _is_plugin_bundle_dir(path: Path) -> bool:
+    return (
+        (path / "plugin.json").is_file()
+        or (path / ".claude-plugin" / "plugin.json").is_file()
+        or (path / ".codex-plugin" / "plugin.json").is_file()
+    )
+
+
 def _target(arguments: dict[str, Any]) -> Path:
     """Resolve the worktree to inspect. Protected paths are never reachable."""
     repo_arg = arguments.get("repo_path")
@@ -42,6 +51,19 @@ def _target(arguments: dict[str, Any]) -> Path:
         if label:
             raise FactoryError(f"Access to '{repo_arg}' denied: {label}.")
         base = os.path.expanduser(repo_arg)
+    else:
+        env_repo = os.environ.get("FACTORY_REPO_PATH") or os.environ.get("CLAUDE_PROJECT_DIR")
+        if env_repo and env_repo.strip():
+            label = path_guard.violation_for(env_repo, os.getcwd())
+            if label:
+                raise FactoryError(f"Access to '{env_repo}' denied: {label}.")
+            base = os.path.expanduser(env_repo)
+        else:
+            cwd_path = Path.cwd()
+            if _is_plugin_bundle_dir(cwd_path):
+                raise FactoryError(
+                    "MCP server is running inside the plugin directory; pass 'repo_path' pointing to your Git repository or worktree."
+                )
     task_id = arguments.get("task_id")
     if task_id is None:
         return worktree_root(base)
@@ -80,10 +102,22 @@ def _telemetry(arguments: dict[str, Any]) -> Any:
 
 
 TOOLS: dict[str, tuple[str, Callable[[dict[str, Any]], Any]]] = {
-    "factory_status": ("Worktree branch, attempt counter, verification state, and last fast-check result.", _status),
-    "factory_plan_read": ("Read .factory-plan.md for the current task.", _plan),
-    "factory_rejected_approaches": ("Approaches already rejected by the hold-out gate. Check before retrying.", _rejected),
-    "factory_telemetry_summary": ("Aggregate hold-out pass/fail metrics and most frequent failing contract ids.", _telemetry),
+    "factory_status": (
+        "Worktree branch, attempt counter, verification state, and last fast-check result. Pass repo_path if running outside the repo.",
+        _status,
+    ),
+    "factory_plan_read": (
+        "Read .factory-plan.md for the current task. Pass repo_path if running outside the repo.",
+        _plan,
+    ),
+    "factory_rejected_approaches": (
+        "Approaches already rejected by the hold-out gate. Check before retrying. Pass repo_path if running outside the repo.",
+        _rejected,
+    ),
+    "factory_telemetry_summary": (
+        "Aggregate hold-out pass/fail metrics and most frequent failing contract ids. Pass repo_path if running outside the repo.",
+        _telemetry,
+    ),
 }
 
 
@@ -113,7 +147,8 @@ def handle(message: Any) -> dict[str, Any] | None:
         request_id = message.get("id") if isinstance(message, dict) else None
         return _error(request_id, -32600, "Invalid Request")
     method, request_id = message["method"], message.get("id")
-    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    raw_params = message.get("params")
+    params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
     if "id" not in message:
         return None
 
@@ -133,7 +168,8 @@ def handle(message: Any) -> dict[str, Any] | None:
         name = params.get("name")
         if name not in TOOLS:
             return _error(request_id, -32602, f"Unknown tool: {name}")
-        arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        raw_args = params.get("arguments")
+        arguments: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
         try:
             payload = TOOLS[name][1](arguments)
         except FactoryError as exc:

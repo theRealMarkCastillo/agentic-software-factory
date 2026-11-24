@@ -10,12 +10,21 @@ from pathlib import Path
 
 from . import doctor, state_manager
 from .common import (
-    EXIT_BLOCK, EXIT_OK, STATE_FILE, WORKTREES_DIR, FactoryError,
-    git, holdouts_root, main_repo_root, repo_slug, run, worktree_root,
+    EXIT_BLOCK,
+    EXIT_OK,
+    INTERNAL_FILES,
+    WORKTREES_DIR,
+    FactoryError,
+    git,
+    holdouts_root,
+    main_repo_root,
+    repo_slug,
+    run,
+    worktree_root,
 )
 
 TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-EXCLUDES = (f"{WORKTREES_DIR}/", STATE_FILE)
+EXCLUDES = (f"{WORKTREES_DIR}/", *INTERNAL_FILES)
 TEMPLATE_NAME = "holdout-repo-template"
 
 DEFAULT_AGENTS_MD = """# Agent Instructions
@@ -24,7 +33,7 @@ This repository is managed by the local agentic software factory.
 
 - Write `.factory-plan.md` before editing application code (`factory-spec-plan` skill).
 - Keep changes inside the scope of the plan and add unit tests under `tests/`.
-- Work for a task happens in its own worktree: `factory-core worktree create <task-id>`.
+- Work for a task happens in its own worktree (`factory-core worktree create <task-id>` or `claude -w <task-id>`), with the agent session/workspace rooted inside `.worktrees/<task-id>`.
 - A sealed hold-out gate runs when you finish. On failure, follow the `factory-triage` skill
   and read `rejected_approaches` in `.factory-state.json` before retrying.
 - `.factory-state.json` is read-only for agents. `~/.factory-holdouts`, the Docker socket,

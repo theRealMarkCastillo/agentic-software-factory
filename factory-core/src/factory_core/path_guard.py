@@ -7,15 +7,26 @@ runtime from encoded bytes) cannot be detected by static inspection.
 
 from __future__ import annotations
 
+import fnmatch
 import glob
 import json
 import os
 import re
 import shlex
 import sys
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
-from .common import EXIT_BLOCK, EXIT_OK, STATE_FILE, TRIAGE_FILE, extract_tool_call, hook_cwd, is_antigravity_payload
+from .common import (
+    EXIT_BLOCK,
+    EXIT_OK,
+    STATE_FILE,
+    TRIAGE_FILE,
+    FactoryError,
+    extract_tool_call,
+    is_antigravity_payload,
+    worktree_root,
+)
 
 PATH_KEYS = {
     "file_path", "path", "target", "filepath", "cwd", "notebook_path",
@@ -38,6 +49,21 @@ STATE_WRITERS = re.compile(
 )
 PATCH_HEADER = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE)
 SHELL_OPERATORS = set("();<>|&")
+CMD_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")"}
+REDIRECT_OUT = {">", ">>", ">|", "&>", "&>>"}
+MUTATING_PROGS = {"rm", "unlink", "mv", "tee", "truncate", "dd", "ln", "install", "patch", "sponge", "chmod", "chown"}
+INTERPRETER_PROGS = {"node", "perl", "ruby", "sh", "bash", "zsh"}
+STATE_SCRIPT_WRITES = re.compile(
+    r"(?:open\s*\([^)]*['\"][wax+]|write_text|write_bytes|writefile|unlink|remove|rename|replace|rmtree|truncate|os\.open)"
+    r"|(?<![A-Za-z0-9_])>(?![>=])",
+    re.IGNORECASE,
+)
+CRITIC_READONLY_PROGS = {
+    "git", "factory-core", "ls", "cat", "head", "tail", "wc", "pwd",
+    "rg", "grep", "egrep", "fgrep", "find", "stat", "diff", "true", "echo", "printf", "cd",
+}
+CRITIC_GIT_READONLY = {"status", "diff", "log", "show", "rev-parse", "ls-files", "branch", "blame", "shortlog", "describe"}
+CRITIC_GIT_MUTATING_BRANCH_FLAGS = {"-d", "-D", "-m", "-M", "-f", "--delete", "--move", "--force", "--copy", "-c", "-C"}
 RAW_MARKERS = (
     (".factory-holdouts", "sealed hold-out directory ~/.factory-holdouts"),
     ("docker.sock", "Docker socket"),
@@ -131,26 +157,51 @@ def _is_operator(token: str) -> bool:
     return bool(token) and set(token) <= SHELL_OPERATORS
 
 
-def _command_words(tokens: list[str]) -> list[tuple[str, list[str]]]:
-    """Split tokens into (program, args) segments, skipping env and wrappers."""
+def _is_redirect_out(segment: list[str], index: int) -> tuple[bool, int]:
+    """Return (is_output_redirect, target_token_index)."""
+    tok = segment[index]
+    if tok in REDIRECT_OUT:
+        return True, index + 1
+    if tok.isdigit() and index + 1 < len(segment) and segment[index + 1] in REDIRECT_OUT:
+        return True, index + 2
+    return False, index
+
+
+def _redirect_targets_ignored(segment: list[str], target_idx: int) -> bool:
+    if target_idx >= len(segment):
+        return True
+    target = segment[target_idx]
+    return target in {"/dev/null", "&"} or target.startswith("&")
+
+
+def _split_segments(tokens: list[str]) -> list[list[str]]:
     segments: list[list[str]] = [[]]
     for token in tokens:
-        if _is_operator(token):
+        if token in CMD_SEPARATORS:
             segments.append([])
         else:
             segments[-1].append(token)
-    words: list[tuple[str, list[str]]] = []
-    for segment in segments:
-        index = 0
-        while index < len(segment):
-            word = segment[index]
-            base = os.path.basename(word)
-            if re.match(r"^[A-Za-z_]\w*=", word) or base in COMMAND_WRAPPERS or word.startswith("-"):
-                index += 1
-                continue
-            words.append((base, segment[index + 1:]))
-            break
-    return words
+    return [seg for seg in segments if seg]
+
+
+def _segment_program(segment: list[str]) -> tuple[str, list[str]] | None:
+    """Return (program_basename, args) for one command segment, skipping env, wrappers, and redirects."""
+    index = 0
+    while index < len(segment):
+        is_redir, target_idx = _is_redirect_out(segment, index)
+        if is_redir:
+            index = target_idx + 1
+            continue
+        word = segment[index]
+        if _is_operator(word):
+            index += 1
+            continue
+        base = os.path.basename(word)
+        if re.match(r"^[A-Za-z_]\w*=", word) or base in COMMAND_WRAPPERS or word.startswith("-"):
+            index += 1
+            continue
+        return base, segment[index + 1:]
+    return None
 
 
 def _path_candidates(token: str) -> Iterator[str]:
@@ -164,7 +215,103 @@ def _normalize_for_scan(command: str) -> str:
     return re.sub(r"[\"'\\]", "", command).casefold()
 
 
-def _check_command(command: str, cwd: str) -> str | None:
+def _touches_state_file(token: str, cwd: str) -> bool:
+    if not token or "\0" in token or token == "/dev/null":
+        return False
+    if STATE_FILE in _normalize_for_scan(token):
+        return True
+    if os.path.basename(_resolve(token, cwd)) == STATE_FILE:
+        return True
+    expanded = os.path.expanduser(os.path.expandvars(token))
+    if glob.has_magic(expanded):
+        if fnmatch.fnmatch(STATE_FILE, os.path.basename(expanded)):
+            return True
+        pattern = expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
+        if any(os.path.basename(m) == STATE_FILE for m in glob.glob(pattern, include_hidden=True)):
+            return True
+    return False
+
+
+def _cd_destination(args: list[str]) -> str:
+    after_dash = False
+    for arg in args:
+        if arg == "--" and not after_dash:
+            after_dash = True
+            continue
+        if not after_dash and arg.startswith("-"):
+            continue
+        if _is_operator(arg):
+            break
+        return arg
+    return "~"
+
+
+def _critic_allows_segment(program: str, args: list[str]) -> str | None:
+    if program not in CRITIC_READONLY_PROGS:
+        return f"The adversarial-critic agent is read-only; command '{program}' is not permitted."
+    if program == "git":
+        subcmd: str | None = None
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if _is_operator(arg):
+                break
+            if arg in {"-C", "-c", "--git-dir", "--work-tree"}:
+                i += 2
+                continue
+            if arg.startswith("-"):
+                i += 1
+                continue
+            subcmd = arg
+            sub_args = args[i + 1:]
+            break
+        if subcmd not in CRITIC_GIT_READONLY:
+            return f"The adversarial-critic agent is read-only; 'git {subcmd or ''}' is not permitted.".strip()
+        if subcmd == "branch" and any(a in CRITIC_GIT_MUTATING_BRANCH_FLAGS for a in sub_args):
+            return "The adversarial-critic agent is read-only; mutating 'git branch' flags are not permitted."
+    elif program == "factory-core":
+        subcmd = next((a for a in args if not a.startswith("-") and not _is_operator(a)), "")
+        if subcmd not in {"status", "doctor"}:
+            return f"The adversarial-critic agent is read-only; 'factory-core {subcmd}' is not permitted."
+    elif program == "find" and any(a in {"-delete", "-exec", "-execdir", "-ok", "-okdir"} for a in args):
+        return "The adversarial-critic agent is read-only; mutating 'find' actions are not permitted."
+    return None
+
+
+def _segment_mutates_state(program: str, args: list[str], seg_cwd: str) -> bool:
+    non_op_args = [a for a in args if not _is_operator(a)]
+    touches = any(
+        _touches_state_file(cand, seg_cwd)
+        for arg in non_op_args
+        if not (arg.startswith("-") and "=" not in arg)
+        for cand in _path_candidates(arg)
+    )
+    if not touches:
+        return False
+    if program in MUTATING_PROGS:
+        return True
+    if program == "cp":
+        positional = [a for a in non_op_args if not a.startswith("-")]
+        if positional and any(_touches_state_file(c, seg_cwd) for c in _path_candidates(positional[-1])):
+            return True
+        for i, a in enumerate(non_op_args):
+            if a in {"-t", "--target-directory"} and i + 1 < len(non_op_args) and _touches_state_file(non_op_args[i + 1], seg_cwd):
+                return True
+        return False
+    if program in {"sed", "perl", "ruby"} and any(a.startswith(("-i", "--in-place")) for a in non_op_args):
+        return True
+    if program in {"curl", "wget"} and any(
+        a in {"-o", "-O", "--output", "--output-document"}
+        or a.startswith(("-o", "-O", "--output=", "--output-document="))
+        for a in non_op_args
+    ):
+        return True
+    if program.startswith("python") or program in INTERPRETER_PROGS:
+        return bool(STATE_SCRIPT_WRITES.search(" ".join(non_op_args)))
+    return False
+
+
+def _check_command(command: str, cwd: str, critic: bool = False) -> str | None:
     normalized = _normalize_for_scan(command)
     for marker, label in RAW_MARKERS:
         if marker in normalized:
@@ -172,35 +319,68 @@ def _check_command(command: str, cwd: str) -> str | None:
 
     tokens = _tokenize(command)
     if tokens is None:
+        if critic:
+            return "The adversarial-critic agent is read-only and cannot run unparsable shell commands."
+        if STATE_FILE in normalized and STATE_WRITERS.search(normalized):
+            return f"{STATE_FILE} is managed by factory-core and may only be read."
         return None  # Raw marker scan above already covered unparsable input.
 
-    words = _command_words(tokens)
-    for program, _ in words:
+    current_cwd = cwd
+    for segment in _split_segments(tokens):
+        parsed = _segment_program(segment)
+        program, args = parsed if parsed else ("", [])
+
         if program in CONTAINER_CLIS:
             return f"Direct '{program}' use is blocked because it can mount the sealed hold-outs. The gate runs containers for you."
 
-    recursive = False
-    for program, args in words:
+        if critic and program:
+            critic_err = _critic_allows_segment(program, args)
+            if critic_err:
+                return critic_err
+
+        # Check output redirections (both critic read-only enforcement and .factory-state.json protection).
+        idx = 0
+        while idx < len(segment):
+            is_redir, target_idx = _is_redirect_out(segment, idx)
+            if is_redir:
+                if not _redirect_targets_ignored(segment, target_idx):
+                    target = segment[target_idx]
+                    if critic:
+                        return "The adversarial-critic agent is read-only and may not redirect shell output to files."
+                    if _touches_state_file(target, current_cwd):
+                        return f"{STATE_FILE} is managed by factory-core and may only be read."
+                idx = target_idx + 1
+                continue
+            idx += 1
+
         has_flag = any(re.match(r"^-[A-Za-z]*[rR]", a) or a == "--recursive" for a in args)
-        if program in RECURSIVE_CLIS or (program in RECURSIVE_WITH_FLAG and has_flag):
-            recursive = True
+        recursive = program in RECURSIVE_CLIS or (program in RECURSIVE_WITH_FLAG and has_flag)
 
-    for token in tokens:
-        if _is_operator(token) or (token.startswith("-") and "=" not in token):
-            continue
-        for candidate in _path_candidates(token):
-            label = violation_for(candidate, cwd, recursive=recursive)
-            if label:
-                return f"Command token '{token}' points to protected location: {label}."
+        for token in segment:
+            if _is_operator(token) or (token.startswith("-") and "=" not in token):
+                continue
+            for candidate in _path_candidates(token):
+                hit_label = violation_for(candidate, current_cwd, recursive=recursive)
+                if hit_label:
+                    return f"Command token '{token}' points to protected location: {hit_label}."
 
-    if STATE_FILE in normalized and STATE_WRITERS.search(normalized):
-        return f"{STATE_FILE} is managed by factory-core and may only be read."
+        if program and _segment_mutates_state(program, args, current_cwd):
+            return f"{STATE_FILE} is managed by factory-core and may only be read."
+
+        if program in {"cd", "pushd"}:
+            dest = _cd_destination(args)
+            cd_label = violation_for(dest, current_cwd, recursive=False)
+            if cd_label:
+                return f"Command token '{dest}' points to protected location: {cd_label}."
+            current_cwd = _resolve(dest, current_cwd)
+
     return None
 
 
 def evaluate_payload(payload: dict[str, Any]) -> tuple[bool, str]:
     tool_name, tool_input = extract_tool_call(payload)
-    base_cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd").strip() else None
+    raw_cwd = payload.get("cwd")
+    base_cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd.strip() else None
     if base_cwd is None:
         workspaces = payload.get("workspacePaths")
         if isinstance(workspaces, list):
@@ -216,18 +396,33 @@ def evaluate_payload(payload: dict[str, Any]) -> tuple[bool, str]:
             cwd = _resolve(value, cwd)
 
     # Where the harness reports the calling subagent, hold the critic to its one output file.
-    agent = payload.get("agent_type")
+    agent = (
+        payload.get("agent_type")
+        or payload.get("agentName")
+        or payload.get("subagentName")
+        or os.environ.get("FACTORY_AGENT", "")
+    )
     critic = isinstance(agent, str) and "adversarial-critic" in agent
+    allowed_triage: str | None = None
+    if critic:
+        try:
+            allowed_triage = os.path.realpath(os.path.join(str(worktree_root(cwd)), TRIAGE_FILE))
+        except FactoryError:
+            allowed_triage = os.path.realpath(os.path.join(cwd, TRIAGE_FILE))
 
     recursive_tool = tool_name in SEARCH_TOOLS
     for key, value in fields:
         if key in PATH_KEYS:
-            if critic and tool_name in WRITE_TOOLS and os.path.basename(value) != TRIAGE_FILE:
+            if (
+                critic
+                and tool_name in WRITE_TOOLS
+                and (allowed_triage is None or _fold(_resolve(value, cwd)) != _fold(allowed_triage))
+            ):
                 return False, f"The adversarial-critic agent is read-only and may write only {TRIAGE_FILE}."
             label = violation_for(value, cwd, recursive=recursive_tool)
             if label:
                 return False, f"Access to protected path argument '{value}' denied: {label}."
-            if tool_name in WRITE_TOOLS and os.path.basename(value) == STATE_FILE:
+            if tool_name in WRITE_TOOLS and os.path.basename(_resolve(value, cwd)) == STATE_FILE:
                 return False, f"{STATE_FILE} is managed by factory-core and may only be read."
 
     for key, value in fields:
@@ -236,13 +431,15 @@ def evaluate_payload(payload: dict[str, Any]) -> tuple[bool, str]:
         if tool_name == "apply_patch" or value.lstrip().startswith("*** Begin Patch"):
             for path in PATCH_HEADER.findall(value):
                 path = path.strip()
+                if critic and (allowed_triage is None or _fold(_resolve(path, cwd)) != _fold(allowed_triage)):
+                    return False, f"The adversarial-critic agent is read-only and may write only {TRIAGE_FILE}."
                 label = violation_for(path, cwd)
                 if label:
                     return False, f"Patch target '{path}' denied: {label}."
-                if os.path.basename(path) == STATE_FILE:
+                if os.path.basename(_resolve(path, cwd)) == STATE_FILE:
                     return False, f"{STATE_FILE} is managed by factory-core and may only be read."
             continue
-        reason = _check_command(value, cwd)
+        reason = _check_command(value, cwd, critic=critic)
         if reason:
             return False, reason
 

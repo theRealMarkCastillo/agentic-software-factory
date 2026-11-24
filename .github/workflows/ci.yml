@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Check shared-skills sync
+        run: |
+          ./scripts/sync-skills.sh
+          git diff --exit-code
+
+      - name: Install factory-core[dev]
+        working-directory: factory-core
+        run: |
+          uv venv
+          uv pip install --python .venv/bin/python -e '.[dev]'
+
+      - name: Lint and type-check
+        working-directory: factory-core
+        run: |
+          .venv/bin/ruff check src tests
+          .venv/bin/mypy --config-file pyproject.toml src
+
+      - name: Run unit, packaging, and Docker integration tests
+        working-directory: factory-core
+        run: .venv/bin/pytest -v

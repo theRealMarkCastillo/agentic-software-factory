@@ -43,7 +43,10 @@ spec's reference code.
   breaker banner and exits 0, as acceptance step 9 requires. Later runs also exit 0
   without starting Docker.
 - **Environment failures.** A missing `Dockerfile`, a patch that does not apply, or a
-  stopped daemon exits 2 without consuming an attempt. Only a verifier run counts.
+  stopped daemon exits 2 without consuming an attempt. Candidate SUT build or healthcheck
+  failures during `docker compose up` do count toward the circuit breaker (with explicit
+  startup diagnostics when `verifier` never started) so broken startup code cannot trap
+  `Stop` hooks in an infinite loop.
 - **Teardown.** `docker compose down -v --remove-orphans --rmi local`. Removing the
   per-run images keeps one image per commit from accumulating; BuildKit's layer cache
   keeps rebuilds fast.

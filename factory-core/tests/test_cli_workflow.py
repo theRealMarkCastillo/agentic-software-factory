@@ -3,11 +3,11 @@
 import json
 
 import pytest
-
-from factory_core import fast_check, state_manager as sm, status, telemetry, worktree
-from factory_core.common import FactoryError
-
 from conftest import git, run_cli
+
+from factory_core import fast_check, status, telemetry, worktree
+from factory_core import state_manager as sm
+from factory_core.common import FactoryError
 
 TRIAGE = "# Triage\n\n## Root Cause Analysis\nx\n\n## Unmet Behavioral Contract Clause\ny\n\n## Target Modification Strategy\nz\n"
 
@@ -163,7 +163,7 @@ def test_fast_check_architecture_violation_hint(repo):
 def test_fast_check_checkers_import_this_checkout_first(repo):
     make_checker(repo, "ruff", 'echo "PYTHONPATH=$PYTHONPATH"; exit 1')
     result = run_cli(["fast-check"], cwd=repo, env={"PATH": "/usr/bin:/bin", "PYTHONPATH": "/elsewhere"})
-    line = next(l for l in result.stdout.splitlines() if l.startswith("PYTHONPATH="))
+    line = next(item for item in result.stdout.splitlines() if item.startswith("PYTHONPATH="))
     assert line.split("=", 1)[1].split(":")[:2] == [str(repo / "src"), str(repo)]
 
 
@@ -374,3 +374,51 @@ def test_triage_accepts_list_style_sections(repo):
 def test_triage_check_ignores_other_subagents(repo):
     result = run_cli(["validate-triage-file"], cwd=repo, stdin=json.dumps({"agent_type": "implementer"}))
     assert result.returncode == 0
+
+
+def test_init_excludes_plan_and_triage_files(repo, home, healthy):
+    assert worktree.init_repo() == 0
+    exclude = (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert ".factory-plan.md" in exclude and ".factory-triage.md" in exclude
+
+
+def test_fast_check_changed_files_preserves_leading_space_and_short_names(repo):
+    (repo / "src" / "app.py").write_text("VALUE = 2\n")
+    (repo / "x").write_text("one\n")
+    git(repo, "add", "x")
+    git(repo, "commit", "-q", "-m", "add single char file")
+    (repo / "x").write_text("two\n")
+    assert sorted(fast_check.changed_files(repo)) == ["src/app.py", "x"]
+
+
+def test_flat_layout_python_project_plans_mypy(tmp_path, monkeypatch):
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='flat'\nversion='0'\n")
+    monkeypatch.setattr(fast_check, "_tool", lambda root, name, local: name)
+    steps, _ = fast_check.plan_steps(tmp_path)
+    assert [s.argv for s in steps] == [["ruff", "check", "."], ["mypy", "--config-file", "pyproject.toml", "."]]
+
+
+def test_antigravity_post_invocation_delivers_pending_fast_check_once(repo, tmp_path):
+    plugin_root = tmp_path / "plugin-root"
+    plugin_root.mkdir()
+    make_checker(repo, "ruff", "echo 'E501 line too long'; exit 1")
+    payload = {
+        "toolCall": {"name": "write_file", "args": {"Path": str(repo / "src" / "app.py")}},
+        "workspacePaths": [str(repo)],
+    }
+    post_tool = run_cli(["fast-check", "--hook", "--platform", "antigravity"], cwd=plugin_root,
+                        env={"PATH": "/usr/bin:/bin"}, stdin=json.dumps(payload))
+    assert post_tool.returncode == 0 and json.loads(post_tool.stdout) == {}
+
+    post_inv = run_cli(["fast-check", "--post-invocation", "--platform", "antigravity"], cwd=plugin_root,
+                       stdin=json.dumps({"workspacePaths": [str(repo)]}))
+    assert post_inv.returncode == 0
+    injected = json.loads(post_inv.stdout)
+    assert "FAST-CHECK FAILED: ruff" in injected["injectSteps"][0]["systemMessage"]["systemMessage"]
+
+    second_inv = run_cli(["fast-check", "--post-invocation", "--platform", "antigravity"], cwd=plugin_root,
+                         stdin=json.dumps({"workspacePaths": [str(repo)]}))
+    assert second_inv.returncode == 0 and json.loads(second_inv.stdout) == {}

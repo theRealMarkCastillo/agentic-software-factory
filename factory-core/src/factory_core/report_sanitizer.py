@@ -5,16 +5,28 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+
+from .common import runtime_tmp_dir
 
 MAX_LINES = 60
 SECRET_KEY = re.compile(r"(?i)(api[_-]?key|password|passwd|secret|token|credential)")
+NON_SECRET_KEY = re.compile(
+    r"(?i)(?:(?:^|_|-)(?:count|type|version|enabled|required|length|limit|ttl|expires|alg|algorithm)$"
+    r"|^(?:max|min|num)[_-])"
+)
+NON_SECRET_VALUES = {"true", "false", "null", "none", "bearer", "basic", "ok"}
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 COMPOSE_PREFIX = re.compile(r"^(?P<service>[\w.-]+?)(?:-\d+)?\s+\|\s?(?P<line>.*)$")
-FRAME_PYTEST = re.compile(r"^(?:\S*/)?(?:holdout/)?suites/(?P<file>[\w./-]+\.py):\d+: in (?P<func>\S+)")
-FRAME_PYTEST_BARE = re.compile(r"^(?:\S*/)?(?:holdout/)?suites/(?P<file>[\w./-]+\.py):\d+:.*$")
-FRAME_PYTHON = re.compile(r'File ".*?(?:holdout/)?suites/([^"]+)", line \d+, in (\w+)')
+FRAME_PYTEST = re.compile(
+    r"^(?:\S*/)?(?:holdout/suites/|suites/|holdout/)(?P<file>[\w./-]+\.py):\d+: in (?P<func>\S+)"
+)
+FRAME_PYTEST_BARE = re.compile(
+    r"^(?:\S*/)?(?:holdout/suites/|suites/|holdout/)(?P<file>[\w./-]+\.py):\d+:.*$"
+)
+FRAME_PYTHON = re.compile(r'File "(?:[^"]*/)?(?:holdout/suites/|suites/|holdout/)([^"]+\.py)", line \d+, in (\w+)')
 FAILED_ID = re.compile(r"(?:FAILED|ERROR)\s+\S*?([\w-]+\.py::[^\s]+)")
 
 
@@ -61,7 +73,9 @@ def _verifier_lines(raw_text: str) -> list[str]:
         match = COMPOSE_PREFIX.match(line)
         if match:
             saw_prefix = True
-            (verifier if match["service"] == "verifier" else other).append(match["line"])
+            svc = match["service"]
+            is_verifier = svc == "verifier" or svc.endswith(("-verifier", "_verifier"))
+            (verifier if is_verifier else other).append(match["line"])
         else:
             other.append(line)
     if saw_prefix and verifier:
@@ -74,12 +88,26 @@ def sanitize_output(raw_text: str, repo_slug: str = "default", secrets: Iterable
     sanitized = "\n".join(lines)
 
     for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
-        sanitized = sanitized.replace(secret, "[REDACTED_SECRET]")
+        if len(secret) >= 6:
+            sanitized = sanitized.replace(secret, "[REDACTED_SECRET]")
+        else:
+            sanitized = re.sub(
+                rf"(?<![A-Za-z0-9]){re.escape(secret)}(?![A-Za-z0-9])",
+                "[REDACTED_SECRET]",
+                sanitized,
+            )
 
+    tmp_dir = str(runtime_tmp_dir())
+    if tmp_dir:
+        sanitized = re.sub(rf"{re.escape(tmp_dir)}/sut-[a-f0-9-]+/?", "", sanitized)
+        sanitized = re.sub(rf"{re.escape(tmp_dir)}/idx-[^/\s:\"']+(?:/[^\s:\"']*)?", "[TEMP_INDEX]", sanitized)
+    sanitized = re.sub(r"(?:/[^/\s:\"']+)*?/\.cache/factory-core/tmp/sut-[a-f0-9-]+/?", "", sanitized)
+    sanitized = re.sub(r"(?:/[^/\s:\"']+)*?/\.cache/factory-core/tmp/idx-[^/\s:\"']+(?:/[^\s:\"']*)?", "[TEMP_INDEX]", sanitized)
     sanitized = re.sub(r"(?:/[^/\s:\"']+)*/\.factory-holdouts(?:/[^\s:\"']*)?", "[SEALED_HOLDOUT_FILE]", sanitized)
     sanitized = re.sub(r"(?:/private)?/tmp/sut-[a-f0-9-]+/?", "", sanitized)
     sanitized = re.sub(r"(?:/private)?/tmp/idx-[a-f0-9-]+", "[TEMP_INDEX]", sanitized)
     sanitized = re.sub(r"/holdout/(?:suites|fixtures)/[^\s:\"']+", "[SEALED_HOLDOUT_FILE]", sanitized)
+    sanitized = re.sub(r"/holdout/[\w./-]+\.py", "[SEALED_HOLDOUT_FILE]", sanitized)
     sanitized = re.sub(r"(?<![\w/])fixtures/[\w./-]+", "[SEALED_HOLDOUT_FILE]", sanitized)
     sanitized = re.sub(r"/(?:Users|home)/[^/\s:\"']+", "[HOST_HOME]", sanitized)
     sanitized = _redact_secrets(sanitized)
@@ -106,7 +134,12 @@ def _collect_secret_values(value: Any, key: str = "") -> Iterable[str]:
     elif isinstance(value, list):
         for child in value:
             yield from _collect_secret_values(child, key)
-    elif isinstance(value, str) and SECRET_KEY.search(key):
+    elif isinstance(value, str) and SECRET_KEY.search(key) and not NON_SECRET_KEY.search(key):
+        stripped = value.strip()
+        if not stripped or stripped.lower() in NON_SECRET_VALUES:
+            return
+        if stripped.isdigit() and len(stripped) < 6:
+            return
         yield value
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
@@ -63,10 +64,8 @@ def _export_otlp(endpoint: str, event: dict[str, Any]) -> None:
     request = urllib.request.Request(
         url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}, method="POST"
     )
-    try:
+    with contextlib.suppress(urllib.error.URLError, OSError, ValueError):
         urllib.request.urlopen(request, timeout=2).read()
-    except (urllib.error.URLError, OSError, ValueError):
-        pass
 
 
 def record(

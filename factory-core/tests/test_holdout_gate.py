@@ -1,10 +1,11 @@
 import json
+import os
 
 import pytest
+from conftest import git, run_cli
 
-from factory_core import compose_runner, doctor, holdout_gate, state_manager as sm, telemetry
-
-from conftest import run_cli
+from factory_core import compose_runner, doctor, holdout_gate, telemetry
+from factory_core import state_manager as sm
 
 FAIL_LOG = """\
 verifier-1  | /holdout/suites/test_contract_example.py:34: in test_health_endpoint_reports_ok
@@ -207,11 +208,35 @@ def test_antigravity_stop_hook_contract_and_workspace_resolution(repo, initializ
 
 def test_missing_sut_dockerfile_is_reported(repo, initialized, monkeypatch):
     (repo / "Dockerfile").unlink()
-    from factory_core.common import FactoryError
+    from factory_core.common import FactoryError, runtime_tmp_dir
     from factory_core.patch_exporter import export_patch
     with pytest.raises(FactoryError) as excinfo:
         compose_runner.run_holdout(repo, export_patch(repo).data, initialized, "t", "abc1234")
     assert "no Dockerfile" in excinfo.value.message
-    import os
-    assert not [n for n in os.listdir("/tmp") if n.startswith("sut-") and os.stat(f"/tmp/{n}").st_uid == os.getuid()
-                and (repo.name in n)]
+    tmp_dir = runtime_tmp_dir()
+    assert not [n for n in os.listdir(tmp_dir) if n.startswith("sut-") and (repo.name in n)]
+
+
+def test_gate_from_clean_main_resolves_single_unverified_worktree(repo, initialized, healthy, oracle, capsys):
+    from factory_core import worktree
+    wt = worktree.create("task-wt")
+    (wt / "src" / "new.py").write_text("X = 1\n")
+    code, out, _ = run_gate(capsys)
+    assert code == 0 and out.startswith("OK (")
+    assert oracle.calls[0]["task_id"] == "task-wt"
+    assert sm.load_state(wt)["verified_tree_hash"] == sm.compute_tree_hash(wt)
+    assert sm.load_state(repo) is None
+
+
+def test_committed_worktree_failure_records_branch_files_touched(repo, initialized, healthy, oracle, capsys, monkeypatch):
+    from factory_core import worktree
+    wt = worktree.create("committed")
+    (wt / "src" / "feature.py").write_text("X = 1\n")
+    git(wt, "add", "src/feature.py")
+    git(wt, "commit", "-q", "-m", "commit feature")
+    monkeypatch.chdir(wt)
+    oracle.exit_code, oracle.output = 1, FAIL_LOG
+    code, _, _ = run_gate(capsys)
+    assert code == 2
+    state = sm.load_state(wt)
+    assert state["rejected_approaches"][0]["files_touched"] == ["src/feature.py"]

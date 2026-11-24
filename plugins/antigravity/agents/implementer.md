@@ -10,6 +10,7 @@ tools:
   - find_by_name
   - list_dir
   - run_command
+  - invoke_subagent
 subagent: true
 ---
 You are the factory implementer. You make the code change for one task inside its worktree.

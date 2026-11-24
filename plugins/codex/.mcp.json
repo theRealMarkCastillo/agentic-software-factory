@@ -1,9 +1,10 @@
 {
   "mcpServers": {
     "factory-core": {
-      "command": "factory-core",
+      "command": "sh",
       "args": [
-        "mcp"
+        "-c",
+        "PATH=\"$HOME/.local/bin:$PATH\" exec factory-core mcp"
       ]
     }
   }

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import FactoryError, run
+from .common import INTERNAL_FILES, FactoryError, run, runtime_tmp_dir
 
 COMPOSE_FILE = "docker-compose.holdout.yml"
 DEFAULT_TIMEOUT = 600
@@ -25,6 +26,7 @@ class GateRun:
     duration_ms: int
     project: str
     timed_out: bool = False
+    verifier_ran: bool = True
 
 
 def project_name(task_id: str, short_sha: str) -> str:
@@ -34,9 +36,9 @@ def project_name(task_id: str, short_sha: str) -> str:
 
 
 def prepare_sut(repo: str | Path, patch: bytes) -> Path:
-    """Extract HEAD into /tmp/sut-<uuid> and apply the candidate patch."""
-    sut_dir = Path(f"/tmp/sut-{uuid.uuid4()}")
-    sut_dir.mkdir(mode=0o700)
+    """Extract HEAD into a private staging dir under runtime_tmp_dir() and apply the candidate patch."""
+    sut_dir = Path(tempfile.mkdtemp(prefix="sut-", dir=runtime_tmp_dir()))
+    os.chmod(sut_dir, 0o700)
     try:
         archive = run(["git", "archive", "--format=tar", "HEAD"], cwd=repo, timeout=120)
         if archive.returncode != 0:
@@ -53,6 +55,8 @@ def prepare_sut(repo: str | Path, patch: bytes) -> Path:
             )
             if applied.returncode != 0:
                 raise FactoryError(f"Candidate patch did not apply: {applied.stderr.decode(errors='replace').strip()}")
+        for name in INTERNAL_FILES:
+            (sut_dir / name).unlink(missing_ok=True)
     except BaseException:
         shutil.rmtree(sut_dir, ignore_errors=True)
         raise
@@ -61,6 +65,16 @@ def prepare_sut(repo: str | Path, patch: bytes) -> Path:
 
 def _compose_base(project: str, compose_file: Path) -> list[str]:
     return ["docker", "compose", "--ansi", "never", "-p", project, "-f", str(compose_file)]
+
+
+def _verifier_started(base: list[str], holdout_dir: str | Path, env: dict[str, str]) -> bool:
+    ps = run([*base, "ps", "-a", "-q", "verifier"], cwd=holdout_dir, env=env, timeout=15)
+    if ps.returncode != 0 or not ps.stdout.strip():
+        return False
+    cid = ps.stdout.decode(errors="replace").strip().splitlines()[0]
+    insp = run(["docker", "inspect", "--format", "{{.State.Status}}", cid], env=env, timeout=15)
+    status_str = insp.stdout.decode(errors="replace").strip().lower()
+    return not (insp.returncode == 0 and status_str == "created")
 
 
 def run_holdout(
@@ -98,27 +112,25 @@ def run_holdout(
             raw, _ = process.communicate(timeout=limit)
         except subprocess.TimeoutExpired:
             timed_out = True
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             raw, _ = process.communicate()
         output = raw.decode(errors="replace")
         if timed_out:
             output += f"\nHold-out gate timed out after {limit:.0f}s."
+        verifier_ran = not timed_out and (process.returncode == 0 or _verifier_started(base, holdout_dir, env))
         return GateRun(
             exit_code=124 if timed_out else process.returncode,
             output=output,
             duration_ms=int((time.monotonic() - started) * 1000),
             project=project,
             timed_out=timed_out,
+            verifier_ran=verifier_ran,
         )
     finally:
         env.setdefault("CLEAN_REPO_DIR", str(sut_dir or "/nonexistent"))
-        try:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
             run([*base, "down", "-v", "--remove-orphans", "--rmi", "local"],
                 cwd=holdout_dir, env=env, timeout=120)
-        except (OSError, subprocess.SubprocessError):
-            pass
         if sut_dir is not None:
             shutil.rmtree(sut_dir, ignore_errors=True)

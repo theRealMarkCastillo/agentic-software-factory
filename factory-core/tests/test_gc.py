@@ -2,10 +2,10 @@ import os
 import time
 
 import pytest
-
-from factory_core import gc, state_manager as sm, worktree
-
 from conftest import git, run_cli
+
+from factory_core import gc, worktree
+from factory_core import state_manager as sm
 
 OLD = time.time() - 30 * 86400
 
@@ -206,3 +206,36 @@ def test_unknown_creation_time_keeps_the_resource(monkeypatch):
     monkeypatch.undo()
     monkeypatch.setattr(gc, "_docker_lines", lambda args: ["garbage"])
     assert gc._created_age("network", "x") == 0.0
+
+
+def test_failed_gate_worktree_at_base_sha_is_not_deleted_as_merged(repo):
+    path = worktree.create("failed-base")
+    state = sm.load_state(path)
+    sm.record_failure(path, state, git(path, "rev-parse", "HEAD"), "boom", ["src/app.py"], "t.py::test_a")
+    report = gc.collect(repo=repo)
+    assert path.is_dir() and "factory/failed-base" in branches(repo)
+    assert report.worktrees == []
+
+
+def test_untouched_verified_worktree_with_no_commits_is_not_deleted_as_merged(repo):
+    path = worktree.create("untouched-pass")
+    state = sm.load_state(path)
+    sm.mark_verified(path, state, sm.compute_tree_hash(path), git(path, "rev-parse", "HEAD"))
+    report = gc.collect(repo=repo)
+    assert path.is_dir() and "factory/untouched-pass" in branches(repo)
+    assert report.worktrees == []
+
+
+def test_reverted_worktree_after_pass_is_not_deleted_as_merged(repo):
+    path = worktree.create("reverted")
+    (path / "src" / "feature.py").write_text("X = 1\n")
+    git(path, "add", "-A")
+    git(path, "commit", "-q", "-m", "feature")
+    (path / "src" / "app.py").write_text("VALUE = 2\n")
+    state = sm.load_state(path)
+    sm.mark_verified(path, state, sm.compute_tree_hash(path), git(path, "rev-parse", "HEAD"))
+    (path / "src" / "app.py").write_text("VALUE = 1\n")
+    git(repo, "merge", "-q", "--ff-only", "factory/reverted")
+    report = gc.collect(repo=repo)
+    assert path.is_dir() and "factory/reverted" in branches(repo)
+    assert report.worktrees == []

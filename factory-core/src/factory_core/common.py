@@ -34,6 +34,14 @@ def holdouts_root() -> Path:
     return Path(os.path.expanduser("~/.factory-holdouts"))
 
 
+def runtime_tmp_dir() -> Path:
+    """Private staging directory under $HOME/.cache (or FACTORY_TMPDIR) for SUT builds and temp indexes."""
+    path = Path(os.path.expanduser(os.environ.get("FACTORY_TMPDIR") or "~/.cache/factory-core/tmp"))
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
 def run(
     args: list[str],
     cwd: str | Path | None = None,
@@ -61,6 +69,31 @@ def git(*args: str, cwd: str | Path, env: dict[str, str] | None = None) -> str:
         detail = proc.stderr.decode(errors="replace").strip()
         raise FactoryError(f"git {args[0]} failed: {detail}")
     return proc.stdout.decode(errors="replace").strip()
+
+
+def porcelain_paths(cwd: str | Path, include_internal: bool = False) -> list[str] | None:
+    """Return paths reported by `git status --porcelain -z`, or None if git status fails."""
+    proc = run(["git", "status", "--porcelain", "-z", "--untracked-files=all"], cwd=cwd, timeout=60)
+    if proc.returncode != 0:
+        return None
+    tokens = proc.stdout.split(b"\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(tokens):
+        entry = tokens[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        status_xy = entry[:2].decode(errors="replace")
+        path_str = entry[3:].decode(errors="surrogateescape")
+        if include_internal or path_str not in INTERNAL_FILES:
+            paths.append(path_str)
+        if ("R" in status_xy or "C" in status_xy) and index < len(tokens):
+            old_path = tokens[index].decode(errors="surrogateescape")
+            index += 1
+            if include_internal and old_path and old_path not in INTERNAL_FILES:
+                paths.append(old_path)
+    return paths
 
 
 def worktree_root(path: str | Path | None = None) -> Path:
@@ -122,17 +155,21 @@ def hook_cwd(payload: dict[str, Any], prefer_tool_target: bool = False) -> str:
     TargetFile) on stdin instead.
     """
     _, tool_args = extract_tool_call(payload)
+    lower_args = {str(k).lower(): v for k, v in tool_args.items()}
     if prefer_tool_target:
-        for key in ("TargetFile", "AbsolutePath", "file_path", "filePath", "path", "target"):
-            val = tool_args.get(key)
+        for key in (
+            "targetfile", "absolutepath", "file_path", "filepath", "path", "target",
+            "notebook_path", "directorypath", "searchpath", "searchdirectory", "dir", "directory",
+        ):
+            val = lower_args.get(key)
             if isinstance(val, str) and val.strip():
                 expanded = Path(os.path.expanduser(val))
                 if expanded.is_absolute():
                     parent = expanded if expanded.is_dir() else expanded.parent
                     if parent.is_dir():
                         return str(parent)
-    for key in ("Cwd", "cwd", "workdir"):
-        val = tool_args.get(key)
+    for key in ("cwd", "workdir"):
+        val = lower_args.get(key)
         if isinstance(val, str) and val.strip():
             return os.path.expanduser(val)
     top_cwd = payload.get("cwd")

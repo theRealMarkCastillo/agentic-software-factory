@@ -7,7 +7,7 @@ import json
 import os
 import stat
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,7 @@ BREAKER_WIDTH = 80
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def new_state(task_id: str, max_retries: int = DEFAULT_MAX_RETRIES) -> dict[str, Any]:

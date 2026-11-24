@@ -3,11 +3,10 @@ import os
 import re
 
 import pytest
+from conftest import git
 
 from factory_core import state_manager as sm
 from factory_core.common import FactoryError
-
-from conftest import git
 
 
 def test_initial_state_matches_schema(repo):

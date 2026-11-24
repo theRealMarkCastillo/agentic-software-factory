@@ -71,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("fast-check", help="Run fast lint, type, and boundary checks.")
     p.add_argument("--hook", action="store_true", help="Report failures on stderr with exit 2 so the agent sees them.")
+    p.add_argument("--post-invocation", action="store_true",
+                   help="Antigravity PostInvocation hook: emit a pending failed fast-check as injectSteps.")
     p.add_argument("--platform", choices=PLATFORMS, default=None)
 
     p = sub.add_parser("holdout-gate", help="Run the sealed hold-out oracle against the candidate patch.")
@@ -108,7 +110,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if command == "guard":
         return path_guard.main(platform=args.platform)
     if command == "fast-check":
-        return fast_check.main(hook=args.hook, platform=args.platform)
+        return fast_check.main(hook=args.hook, platform=args.platform, post_invocation=args.post_invocation)
     if command == "holdout-gate":
         return holdout_gate.main(platform=args.platform)
     if command == "status":

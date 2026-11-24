@@ -2,7 +2,7 @@
   "factory-guard": {
     "PreToolUse": [
       {
-        "matcher": "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content|grep_search|find_by_name",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
@@ -16,7 +16,7 @@
   "factory-fast-check": {
     "PostToolUse": [
       {
-        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content",
         "hooks": [
           {
             "type": "command",
@@ -25,13 +25,20 @@
           }
         ]
       }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { printf '{}\\n'; exit 0; }; factory-core fast-check --post-invocation --platform antigravity",
+        "timeout": 10
+      }
     ]
   },
   "factory-holdout-gate": {
     "Stop": [
       {
         "type": "command",
-        "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { if grep -q '\"continuationActive\"[[:space:]]*:[[:space:]]*true'; then printf '{\"decision\":\"stop\"}\\n'; else msg='BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.'; printf '%s\\n' \"$msg\" >&2; printf '{\"decision\":\"continue\",\"reason\":\"%s\"}\\n' \"$msg\"; fi; exit 0; }; factory-core holdout-gate --platform antigravity",
+        "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { payload=$(cat); if printf '%s' \"$payload\" | grep -q '\"continuationActive\"[[:space:]]*:[[:space:]]*true' || printf '%s' \"$payload\" | grep -q '\"fullyIdle\"[[:space:]]*:[[:space:]]*false' || printf '%s' \"$payload\" | grep -Eiq '\"terminationReason\"[[:space:]]*:[[:space:]]*\"(USER_CANCELED|ERROR|MAX_)'; then printf '{\"decision\":\"stop\"}\\n'; else msg='BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.'; printf '%s\\n' \"$msg\" >&2; printf '{\"decision\":\"continue\",\"reason\":\"%s\"}\\n' \"$msg\"; fi; exit 0; }; factory-core holdout-gate --platform antigravity",
         "timeout": 900
       }
     ]

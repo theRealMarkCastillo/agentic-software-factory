@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -14,8 +15,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .common import (
-    EXIT_BLOCK, EXIT_FAIL, EXIT_OK, FactoryError,
-    git, hook_cwd, is_antigravity_payload, run, worktree_root,
+    EXIT_BLOCK,
+    EXIT_FAIL,
+    EXIT_OK,
+    FactoryError,
+    git,
+    hook_cwd,
+    is_antigravity_payload,
+    porcelain_paths,
+    run,
+    worktree_root,
 )
 
 TIMEOUT_SECONDS = 15.0
@@ -42,6 +51,25 @@ def _first_existing(root: Path, names: tuple[str, ...]) -> bool:
     return any((root / name).exists() for name in names)
 
 
+def _should_typecheck_flat_layout(root: Path) -> bool:
+    if _first_existing(root, ("mypy.ini", ".mypy.ini")):
+        return True
+    for cfg in ("pyproject.toml", "setup.cfg"):
+        path = root / cfg
+        if path.is_file() and re.search(r"(?m)^\[(?:tool\.)?mypy\]", path.read_text(errors="replace")):
+            return True
+    skip = {"tests", "test", "docs", "doc", "build", "dist", "venv", ".venv"}
+    for entry in root.iterdir():
+        if (
+            entry.is_dir()
+            and not entry.name.startswith(".")
+            and entry.name not in skip
+            and (entry / "__init__.py").is_file()
+        ):
+            return True
+    return False
+
+
 def plan_steps(root: Path) -> tuple[list[Step], list[str]]:
     """Return runnable steps and the names of checkers that are not installed."""
     steps: list[Step] = []
@@ -64,6 +92,10 @@ def plan_steps(root: Path) -> tuple[list[Step], list[str]]:
             mypy_args = ["--config-file", "pyproject.toml", "src/"] if (root / "pyproject.toml").exists() else ["src/"]
             add("mypy", "mypy", py_dirs, mypy_args,
                 "Correct the type errors at the listed locations; do not silence them with `# type: ignore`.")
+        elif _should_typecheck_flat_layout(root):
+            mypy_args = ["--config-file", "pyproject.toml", "."] if (root / "pyproject.toml").exists() else ["."]
+            add("mypy", "mypy", py_dirs, mypy_args,
+                "Correct the type errors at the listed locations; do not silence them with `# type: ignore`.")
         if _first_existing(root, (".importlinter", "importlinter.ini")):
             add("import-linter", "lint-imports", py_dirs, [],
                 "An import crosses a declared layer boundary. Depend on the allowed layer or move the code.")
@@ -84,8 +116,7 @@ def plan_steps(root: Path) -> tuple[list[Step], list[str]]:
 
 
 def changed_files(root: Path) -> list[str]:
-    out = git("status", "--porcelain", cwd=root)
-    return [line[3:] for line in out.splitlines() if len(line) > 3]
+    return porcelain_paths(root, include_internal=False) or []
 
 
 def _run_step(step: Step, root: Path, deadline: float) -> tuple[int, str, bool]:
@@ -105,10 +136,8 @@ def _run_step(step: Step, root: Path, deadline: float) -> tuple[int, str, bool]:
         raw, _ = process.communicate(timeout=remaining)
         return process.returncode, raw.decode(errors="replace"), False
     except subprocess.TimeoutExpired:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
         raw, _ = process.communicate()
         return 124, raw.decode(errors="replace"), True
 
@@ -126,13 +155,21 @@ def _trim(output: str) -> str:
     return "\n".join(lines)
 
 
-def _save_result(root: Path, result: str, duration: float) -> None:
+def _save_result(
+    root: Path,
+    result: str,
+    duration: float,
+    report: str | None = None,
+    pending_injection: bool = False,
+) -> None:
     try:
         git_dir = Path(git("rev-parse", "--absolute-git-dir", cwd=root))
         (git_dir / RESULT_FILE).write_text(json.dumps({
             "result": result,
             "duration_s": round(duration, 2),
             "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "report": report,
+            "pending_injection": pending_injection,
         }))
     except (FactoryError, OSError):
         pass
@@ -146,21 +183,49 @@ def load_result(root: Path) -> dict | None:
         return None
 
 
-def main(hook: bool = False, platform: str | None = None) -> int:
+def _consume_pending_injection(root: Path) -> str | None:
+    saved = load_result(root)
+    if not saved or not saved.get("pending_injection"):
+        return None
+    report = saved.get("report")
+    saved["pending_injection"] = False
+    try:
+        git_dir = Path(git("rev-parse", "--absolute-git-dir", cwd=root))
+        (git_dir / RESULT_FILE).write_text(json.dumps(saved))
+    except (FactoryError, OSError):
+        pass
+    return report if isinstance(report, str) and report.strip() else None
+
+
+def main(hook: bool = False, platform: str | None = None, post_invocation: bool = False) -> int:
     """Exit 0 on pass, 1 on failure. In hook mode failures exit 2 on stderr (or {} exit 0 on Antigravity)."""
     started = time.monotonic()
     payload: dict = {}
-    if hook and not sys.stdin.isatty():
+    if (hook or post_invocation) and not sys.stdin.isatty():
         # PostToolBatch has no matcher, so skip batches that edited nothing.
         try:
             parsed = json.loads(sys.stdin.read() or "{}")
             payload = parsed if isinstance(parsed, dict) else {}
         except ValueError:
             payload = {}
-        if payload.get("hook_event_name") == "PostToolBatch":
+        if hook and payload.get("hook_event_name") == "PostToolBatch":
             calls = json.dumps(payload.get("tool_calls", payload))
             if not re.search(r'"(Edit|Write|MultiEdit|NotebookEdit)"', calls):
                 return EXIT_OK
+
+    if post_invocation:
+        target_cwd = hook_cwd(payload) if payload else None
+        try:
+            root = worktree_root(target_cwd)
+        except FactoryError:
+            print("{}")
+            return EXIT_OK
+        pending = _consume_pending_injection(root)
+        if pending:
+            print(json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": pending}}]}))
+        else:
+            print("{}")
+        return EXIT_OK
 
     antigravity = hook and is_antigravity_payload(payload, platform)
     target_cwd = hook_cwd(payload, prefer_tool_target=True) if payload else None
@@ -173,6 +238,7 @@ def main(hook: bool = False, platform: str | None = None) -> int:
             print("OK (0.0s) [not a Git repository]")
         return EXIT_OK
     if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=root).returncode == 0 and not changed_files(root):
+        _save_result(root, "ok", 0.0, report=None, pending_injection=False)
         if antigravity:
             print("{}")
         else:
@@ -193,7 +259,7 @@ def main(hook: bool = False, platform: str | None = None) -> int:
             title = f"FAST-CHECK FAILED: {step.name} (exit {code}, {duration:.1f}s)"
             hint = step.hint
         report = "\n".join(part for part in (title, _trim(output), f"Remediation: {hint}") if part)
-        _save_result(root, f"failed: {step.name}", duration)
+        _save_result(root, f"failed: {step.name}", duration, report=report, pending_injection=antigravity)
         if antigravity:
             print(report, file=sys.stderr)
             print("{}")
@@ -203,7 +269,7 @@ def main(hook: bool = False, platform: str | None = None) -> int:
 
     duration = time.monotonic() - started
     suffix = f" [skipped, not installed: {', '.join(missing)}]" if missing else ""
-    _save_result(root, "ok", duration)
+    _save_result(root, "ok", duration, report=None, pending_injection=False)
     if antigravity:
         print("{}")
     else:

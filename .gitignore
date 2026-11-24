@@ -8,3 +8,5 @@ dist/
 build/
 .worktrees/
 .factory-state.json
+.factory-plan.md
+.factory-triage.md

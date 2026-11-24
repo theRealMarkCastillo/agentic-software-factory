@@ -2,10 +2,9 @@ import json
 import os
 
 import pytest
+from conftest import run_cli
 
 from factory_core.path_guard import evaluate_payload
-
-from conftest import run_cli
 
 
 def bash(command, **extra):
@@ -350,3 +349,61 @@ def test_malformed_payload_fails_closed(repo, stdin):
     diagnostic, = result.stderr.splitlines()
     assert "Malformed hook payload" in diagnostic
     assert json.loads(result.stdout) == {"decision": "deny", "reason": diagnostic}
+
+
+def test_antigravity_v2_file_tools_with_capital_path_are_blocked(repo, seal, tmp_path):
+    plugin_root = tmp_path / "plugin-root"
+    plugin_root.mkdir()
+    assert denied({
+        "toolCall": {"name": "read_file", "args": {"Path": str(seal / "demo-repo" / "suites" / "test_secret.py")}},
+        "workspacePaths": [str(repo)],
+    })
+    assert denied({
+        "toolCall": {"name": "write_file", "args": {"Path": str(repo / ".factory-state.json"), "Content": "{}"}},
+        "workspacePaths": [str(repo)],
+    })
+    assert denied({
+        "toolCall": {"name": "edit_file", "args": {"Path": str(repo / ".factory-state.json")}},
+        "workspacePaths": [str(repo)],
+    })
+    assert not denied({
+        "toolCall": {"name": "read_file", "args": {"Path": str(repo / "src" / "app.py")}},
+        "workspacePaths": [str(repo)],
+    })
+
+
+def test_compound_cd_traversal_is_blocked(nested_cwd, seal):
+    assert denied(bash("cd .. && cd .. && grep -r SECRET ."))
+    assert denied(bash("cd && rg SECRET ."))
+    assert not denied(bash("cd src && ls"))
+
+
+def test_state_file_reads_allowed_and_glob_writes_blocked(repo):
+    assert not denied(bash("cat .factory-state.json 2>/dev/null"))
+    assert not denied(bash('python3 -c "import json; print(json.load(open(\'.factory-state.json\')))"'))
+    assert denied(bash("rm .factory-state*"))
+    assert denied(bash("echo '{}' > .factory-state.?son"))
+
+
+def test_critic_cannot_escape_triage_via_path_patch_or_shell(repo):
+    def critic_payload(tool_name, tool_input):
+        return {
+            "tool_name": tool_name,
+            "agent_type": "agentic-software-factory:adversarial-critic",
+            "cwd": str(repo),
+            "tool_input": tool_input,
+        }
+
+    assert denied(critic_payload("Write", {"file_path": str(repo / "src" / ".factory-triage.md")}))
+    assert denied(critic_payload("Write", {"file_path": str(repo.parent / ".factory-triage.md")}))
+    assert not denied(critic_payload("Write", {"file_path": str(repo / ".factory-triage.md")}))
+
+    patch_src = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-VALUE = 1\n+VALUE = 2\n*** End Patch\n"
+    patch_triage = "*** Begin Patch\n*** Add File: .factory-triage.md\n+## Root Cause Analysis\nx\n*** End Patch\n"
+    assert denied(critic_payload("apply_patch", {"command": patch_src}))
+    assert not denied(critic_payload("apply_patch", {"command": patch_triage}))
+
+    assert denied(critic_payload("Bash", {"command": "echo x > src/app.py"}))
+    assert denied(critic_payload("Bash", {"command": "rm src/app.py"}))
+    assert denied(critic_payload("Bash", {"command": "git reset --hard"}))
+    assert not denied(critic_payload("Bash", {"command": "git diff && git status --porcelain && git log -n 3"}))

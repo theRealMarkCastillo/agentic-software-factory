@@ -36,6 +36,10 @@ factory-core init                          # creates ~/.factory-holdouts/<repo>/
 factory-core worktree create my-task       # prints the path of .worktrees/my-task
 ```
 
+Launch your agent session or workspace rooted inside `.worktrees/my-task` (or use
+`claude -w my-task` in Claude Code) so edits, fast checks, and the `Stop` hold-out gate
+all operate on the isolated task worktree.
+
 `init` writes an example contract. Replace it with real acceptance tests in
 `~/.factory-holdouts/<repo>/suites/`. Your repository needs a `Dockerfile` at its root
 that serves the application on port 8080 with a `/health` endpoint, and the image must

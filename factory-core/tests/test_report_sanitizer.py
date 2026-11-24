@@ -121,3 +121,40 @@ def test_output_is_bounded():
 
 def test_strips_ansi_sequences():
     assert sanitize_output("\x1b[31mE   assert 1 == 2\x1b[0m") == "E   assert 1 == 2"
+
+
+def test_compose_project_prefixed_verifier_stream_is_extracted():
+    raw = (
+        "holdout-task-a-1234abcd-sut-1       | INFO boot noise\n"
+        "holdout-task-a-1234abcd-verifier-1  | E   assert 500 == 200\n"
+    )
+    out = sanitize_output(raw)
+    assert out == "E   assert 500 == 200"
+
+
+def test_short_or_metadata_fixture_values_do_not_corrupt_output(tmp_path):
+    (tmp_path / "meta.json").write_text(
+        '{"secret_version": "1", "token_type": "Bearer", "max_tokens": "4", "auth": {"api_key": "K1"}}'
+    )
+    secrets = fixture_secrets(tmp_path)
+    assert secrets == {"K1"}
+    raw = "E   assert 1 == 200 in 0.14s\nE   Bearer rejected K1 (K10 untouched)"
+    out = sanitize_output(raw, secrets=secrets)
+    assert "assert 1 == 200 in 0.14s" in out
+    assert "[REDACTED_SECRET] (K10 untouched)" in out
+
+
+def test_holdout_conftest_frames_are_stripped():
+    raw = (
+        "/holdout/conftest.py:18: in auth_client\n"
+        "    assert token == 'secret-sauce'\n"
+        "E   AssertionError\n"
+    )
+    out = sanitize_output(raw)
+    assert "In Behavioral Contract Check (conftest.py -> auth_client)" in out
+    assert "secret-sauce" not in out
+
+
+def test_cache_sut_paths_are_stripped_before_host_home():
+    raw = "COPY failed: /Users/alice/.cache/factory-core/tmp/sut-0f8fad5b-d9cb-469f-a165-70867728950e/src/app.py"
+    assert sanitize_output(raw) == "COPY failed: src/app.py"

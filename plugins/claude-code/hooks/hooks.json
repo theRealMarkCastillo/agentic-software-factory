@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core worktree init-state --hook",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core worktree init-state --hook",
             "timeout": 60
           }
         ]
@@ -13,11 +13,11 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Read|Grep|Glob|Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core guard",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core guard",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
             "timeout": 30
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
             "timeout": 30
           }
         ]
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core status --compact-summary",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || exit 0; factory-core status --compact-summary",
             "timeout": 15
           }
         ]
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core status --compact-summary",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || exit 0; factory-core status --compact-summary",
             "timeout": 15
           }
         ]
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core validate-triage-file",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || exit 0; factory-core validate-triage-file",
             "timeout": 15
           }
         ]
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core holdout-gate",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core holdout-gate",
             "timeout": 900
           }
         ]

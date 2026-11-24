@@ -15,12 +15,5 @@
     "url": "https://github.com/theRealMarkCastillo"
   },
   "homepage": "https://github.com/theRealMarkCastillo/agentic-software-factory#readme",
-  "repository": "https://github.com/theRealMarkCastillo/agentic-software-factory",
-  "license": "MIT",
-  "keywords": [
-    "factory",
-    "hold-out",
-    "worktrees",
-    "verification"
-  ]
+  "repository": "https://github.com/theRealMarkCastillo/agentic-software-factory"
 }

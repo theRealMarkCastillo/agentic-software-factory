@@ -8,7 +8,6 @@ import subprocess
 import tomllib
 
 import pytest
-
 from conftest import REPO_ROOT
 
 PLUGINS = REPO_ROOT / "plugins"
@@ -82,7 +81,7 @@ def test_claude_hooks_use_nested_matcher_groups_for_every_event():
         assert isinstance(groups, list) and groups, event
         for group in groups:
             assert all(h["type"] == "command" and h["command"] for h in group["hooks"]), event
-    assert hooks["PreToolUse"][0]["matcher"].split("|")[:6] == ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
+    assert hooks["PreToolUse"][0]["matcher"] == ".*"
     assert "factory-core guard" in hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert "factory-core holdout-gate" in hooks["Stop"][0]["hooks"][0]["command"]
     assert hooks["SubagentStop"][0]["matcher"] == "adversarial-critic"
@@ -92,15 +91,19 @@ def test_claude_hooks_use_nested_matcher_groups_for_every_event():
 
 def test_codex_and_antigravity_hook_bindings():
     codex = load("plugins/codex/hooks/hooks.json")["hooks"]
-    assert codex["PreToolUse"][0]["matcher"] == "^Bash$|^apply_patch$"
+    assert codex["PreToolUse"][0]["matcher"] == ".*"
     assert codex["PostToolUse"][0]["matcher"] == "^apply_patch$"
     assert set(codex) == {"PreToolUse", "PostToolUse", "Stop"}
     agy = load("plugins/antigravity/hooks.json")
     assert "hooks" not in agy, "Antigravity names each hook at the top level"
     events = {event for hook in agy.values() for event in hook}
-    assert events == {"PreToolUse", "PostToolUse", "Stop"}
+    assert events == {"PreToolUse", "PostToolUse", "PostInvocation", "Stop"}
     matcher = agy["factory-guard"]["PreToolUse"][0]["matcher"]
-    assert matcher == "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content|grep_search|find_by_name"
+    assert matcher == "*"
+    post_matcher = agy["factory-fast-check"]["PostToolUse"][0]["matcher"]
+    assert post_matcher == "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content"
+    post_inv_cmd = agy["factory-fast-check"]["PostInvocation"][0]["command"]
+    assert "factory-core fast-check --post-invocation --platform antigravity" in post_inv_cmd
 
 
 @pytest.mark.parametrize("path", ["plugins/claude-code/hooks/hooks.json", "plugins/codex/hooks/hooks.json"])
@@ -146,6 +149,12 @@ def test_antigravity_hooks_fail_closed_with_exit_0_json_when_factory_core_is_mis
     )
     assert gate_loop.returncode == 0 and json.loads(gate_loop.stdout) == {"decision": "stop"}
 
+    gate_canceled = subprocess.run(
+        ["sh", "-c", gate_cmd], input='{"fullyIdle": true, "terminationReason": "USER_CANCELED"}',
+        text=True, capture_output=True, env=env, check=False,
+    )
+    assert gate_canceled.returncode == 0 and json.loads(gate_canceled.stdout) == {"decision": "stop"}
+
 
 @pytest.mark.skipif(shutil.which("agy") is None, reason="agy CLI not installed")
 def test_antigravity_plugin_passes_agy_strict_validation():
@@ -160,9 +169,17 @@ def test_antigravity_plugin_passes_agy_strict_validation():
     assert report["findings"] == []
 
 
-@pytest.mark.parametrize("path", ["plugins/claude-code/.mcp.json", "plugins/codex/.mcp.json", "plugins/antigravity/mcp_config.json"])
-def test_mcp_registration(path):
-    assert load(path) == {"mcpServers": {"factory-core": {"command": "factory-core", "args": ["mcp"]}}}
+def test_mcp_registration():
+    assert load("plugins/antigravity/mcp_config.json") == {
+        "mcpServers": {"factory-core": {"command": "factory-core", "args": ["mcp"]}}
+    }
+    for path in ("plugins/claude-code/.mcp.json", "plugins/codex/.mcp.json"):
+        cfg = load(path)["mcpServers"]["factory-core"]
+        assert cfg["command"] == "sh" and "exec factory-core mcp" in cfg["args"][1]
+
+
+def test_claude_plugin_has_icon():
+    assert (PLUGINS / "claude-code" / ".claude-plugin" / "icon.png").is_file()
 
 
 def test_codex_agents_and_config_are_valid_toml():
@@ -173,7 +190,8 @@ def test_codex_agents_and_config_are_valid_toml():
     assert implementer["name"] == "implementer" and "factory-holdouts" in implementer["developer_instructions"]
     config = tomllib.loads((PLUGINS / "codex" / "config" / "factory.toml").read_text())
     assert config["features"]["hooks"] is True
-    assert config["mcp_servers"]["factory-core"] == {"command": "factory-core", "args": ["mcp"]}
+    assert config["mcp_servers"]["factory-core"]["command"] == "sh"
+    assert "exec factory-core mcp" in config["mcp_servers"]["factory-core"]["args"][1]
 
 
 @pytest.mark.parametrize("plugin", ["claude-code", "antigravity"])

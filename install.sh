@@ -59,7 +59,7 @@ echo "Docker Engine and Compose ${compose_version#v} verified."
 # --- 2. factory-core ------------------------------------------------------------
 find_python() {
   local candidate
-  for candidate in python3.13 python3.12 python3.11 python3; do
+  for candidate in python3 python3.15 python3.14 python3.13 python3.12 python3.11; do
     if command -v "$candidate" >/dev/null 2>&1 &&
        "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>/dev/null; then
       command -v "$candidate"

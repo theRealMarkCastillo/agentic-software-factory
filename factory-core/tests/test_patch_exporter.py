@@ -2,11 +2,10 @@ import os
 import shutil
 
 import pytest
-
-from factory_core import compose_runner
-from factory_core.patch_exporter import export_patch
-
 from conftest import git
+
+from factory_core import common, compose_runner
+from factory_core.patch_exporter import export_patch
 
 
 @pytest.fixture
@@ -44,9 +43,10 @@ def test_real_index_and_worktree_are_not_mutated(changed):
 
 
 def test_temporary_index_is_removed(changed):
-    before = {name for name in os.listdir("/tmp") if name.startswith("idx-")}
+    tmp_dir = common.runtime_tmp_dir()
+    before = {name for name in os.listdir(tmp_dir) if name.startswith("idx-")}
     export_patch(changed)
-    assert {name for name in os.listdir("/tmp") if name.startswith("idx-")} == before
+    assert {name for name in os.listdir(tmp_dir) if name.startswith("idx-")} == before
 
 
 def test_clean_tree_yields_empty_patch(repo):
@@ -126,7 +126,8 @@ def test_patch_reproduces_the_working_tree(changed):
     patch = export_patch(changed)
     sut = compose_runner.prepare_sut(changed, patch.data)
     try:
-        assert sut.name.startswith("sut-") and str(sut.parent) == "/tmp"
+        assert sut.name.startswith("sut-") and sut.parent == common.runtime_tmp_dir().resolve()
+        assert sut.stat().st_mode & 0o777 == 0o700
         assert (sut / "src" / "app.py").read_text() == "VALUE = 2\n"
         assert (sut / "src" / "new_module.py").read_text().startswith("def added")
         assert (sut / "assets" / "blob.bin").read_bytes() == bytes(range(256)) * 4

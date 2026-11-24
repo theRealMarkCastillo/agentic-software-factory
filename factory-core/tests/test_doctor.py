@@ -2,10 +2,9 @@ import json
 import shutil
 
 import pytest
+from conftest import run_cli
 
 from factory_core import doctor
-
-from conftest import run_cli
 
 
 def fake_probe(responses):

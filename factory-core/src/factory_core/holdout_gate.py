@@ -9,8 +9,19 @@ from pathlib import Path
 
 from . import compose_runner, doctor, patch_exporter, report_sanitizer, state_manager, telemetry
 from .common import (
-    EXIT_BLOCK, EXIT_OK, FactoryError, emit_block,
-    git, holdout_dir, hook_cwd, is_antigravity_payload, run, worktree_root,
+    EXIT_BLOCK,
+    EXIT_OK,
+    INTERNAL_FILES,
+    WORKTREES_DIR,
+    FactoryError,
+    emit_block,
+    git,
+    holdout_dir,
+    hook_cwd,
+    is_antigravity_payload,
+    main_repo_root,
+    run,
+    worktree_root,
 )
 from .worktree import _task_id_from_branch
 
@@ -54,6 +65,74 @@ def _summary(sanitized: str, contracts: list[str], timed_out: bool) -> str:
     return (tail[-1] if tail else "Hold-out environment failed before the verifier ran.")[:SUMMARY_LIMIT]
 
 
+def _resolve_gate_root(root: Path) -> tuple[Path, str | None]:
+    """If invoked on clean main while .worktrees/ has unverified work, redirect or block."""
+    try:
+        main_root = main_repo_root(root)
+    except FactoryError:
+        return root, None
+    if root != main_root:
+        return root, None
+    worktrees_base = main_root / WORKTREES_DIR
+    if not worktrees_base.is_dir():
+        return root, None
+    if patch_exporter.export_patch(main_root).files:
+        return root, None
+    try:
+        main_hash = state_manager.compute_tree_hash(main_root)
+    except FactoryError:
+        return root, None
+
+    unverified: list[Path] = []
+    for candidate in sorted(p for p in worktrees_base.iterdir() if p.is_dir()):
+        if run(["git", "rev-parse", "--is-inside-work-tree"], cwd=candidate).returncode != 0:
+            continue
+        try:
+            wt_hash = state_manager.compute_tree_hash(candidate)
+            wt_state = state_manager.load_state(candidate)
+        except FactoryError:
+            continue
+        if wt_hash == main_hash:
+            continue
+        if wt_state is not None and state_manager.breaker_tripped(wt_state):
+            continue
+        if wt_state is None or not state_manager.is_verified(wt_state, wt_hash):
+            unverified.append(candidate)
+
+    if len(unverified) == 1:
+        return unverified[0], None
+    if len(unverified) > 1:
+        names = ", ".join(f"{WORKTREES_DIR}/{p.name}" for p in unverified)
+        return root, (
+            f"Multiple unverified task worktrees exist ({names}) while running from the main checkout. "
+            "Run `factory-core holdout-gate` from the target worktree."
+        )
+    return root, None
+
+
+def _committed_files_touched(root: Path) -> list[str]:
+    try:
+        main_root = main_repo_root(root)
+    except FactoryError:
+        return []
+    if root == main_root:
+        return []
+    main_head = run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=main_root).stdout.decode().strip()
+    if not main_head:
+        return []
+    base = run(["git", "merge-base", "HEAD", main_head], cwd=root)
+    if base.returncode != 0 or not base.stdout.strip():
+        return []
+    diff = run(["git", "diff", "--name-only", "-z", "--no-renames", base.stdout.decode().strip(), "HEAD"], cwd=root)
+    if diff.returncode != 0:
+        return []
+    return [
+        name.decode(errors="surrogateescape")
+        for name in diff.stdout.split(b"\0")
+        if name and name.decode(errors="surrogateescape") not in INTERNAL_FILES
+    ]
+
+
 def main(platform: str | None = None) -> int:
     hook_payload = _read_hook_payload()
     antigravity = is_antigravity_payload(hook_payload, platform)
@@ -78,6 +157,11 @@ def main(platform: str | None = None) -> int:
         # Outside a Git repository there is no candidate to verify.
         print("factory-core holdout-gate: not a Git repository, nothing to verify.", file=sys.stderr)
         return _agy_allow_stop() if antigravity else EXIT_OK
+
+    if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=root).returncode == 0:
+        root, ambiguity_error = _resolve_gate_root(root)
+        if ambiguity_error:
+            return block_env(ambiguity_error, status="ambiguous_worktree")
 
     checks = doctor.run_checks()
     if not all(check.ok for check in checks):
@@ -141,8 +225,9 @@ def main(platform: str | None = None) -> int:
     sanitized = report_sanitizer.sanitize_output(result.output, seal.name, secrets)
     contracts = report_sanitizer.failed_contracts(result.output)
     failed_contract = contracts[0] if contracts else None
+    touched = patch.files or _committed_files_touched(root)
     attempts = state_manager.record_failure(
-        root, state, head_sha, _summary(sanitized, contracts, result.timed_out), patch.files, failed_contract
+        root, state, head_sha, _summary(sanitized, contracts, result.timed_out), touched, failed_contract
     )
     telemetry.record(
         seal, task_id, attempts, duration_ms, "fail", failed_contract, tree_hash,
@@ -154,6 +239,12 @@ def main(platform: str | None = None) -> int:
         "Remediation: follow the factory-triage skill. Delegate diagnosis to the adversarial-critic agent, "
         "write .factory-triage.md, then apply a targeted fix. Do not repeat a rejected approach."
     )
+    if not result.verifier_ran and not result.timed_out:
+        hint = (
+            "Note: the verifier container did not start because the candidate SUT image failed to build or "
+            "pass its :8080/health check (ensure Dockerfile builds cleanly, includes curl, and serves HTTP 200 on /health).\n"
+            + hint
+        )
     report = f"{header}\n{sanitized}\n{hint}"
     if state_manager.breaker_tripped(state):
         banner = state_manager.breaker_banner(state)
