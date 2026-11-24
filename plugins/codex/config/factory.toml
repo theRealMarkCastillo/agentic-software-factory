@@ -1,0 +1,15 @@
+# Agentic Software Factory: Codex configuration fragment.
+# install.sh does not edit ~/.codex/config.toml. Merge the parts you need by hand.
+
+[features]
+hooks = true          # Lifecycle hooks: path guard, fast-check, hold-out gate.
+multi_agent = true    # Lets the main agent delegate to adversarial-critic.
+
+# The plugin already registers this server through .mcp.json.
+# Keep this block only if you run the factory without the plugin.
+[mcp_servers.factory-core]
+command = "factory-core"
+args = ["mcp"]
+
+# Custom agents are read from ~/.codex/agents/ (user) or .codex/agents/ (project).
+# install.sh --platform codex copies agents/*.toml from this plugin to ~/.codex/agents/.

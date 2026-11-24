@@ -1,0 +1,12 @@
+{
+  "auth": {
+    "api_key": "example-holdout-key-replace-me"
+  },
+  "health": {
+    "path": "/health",
+    "status_code": 200,
+    "body": {
+      "status": "ok"
+    }
+  }
+}

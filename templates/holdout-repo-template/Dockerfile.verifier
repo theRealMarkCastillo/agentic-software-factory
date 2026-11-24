@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+WORKDIR /holdout
+RUN pip install --no-cache-dir \
+    pytest==8.0.2 \
+    httpx==0.27.0 \
+    jsonschema==4.21.1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+ENTRYPOINT ["pytest"]
+CMD ["-q", "--tb=short", "-p", "no:cacheprovider", "/holdout/suites"]

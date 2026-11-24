@@ -1,0 +1,41 @@
+# Sealed hold-out oracle. Run only by `factory-core holdout-gate`.
+# No `ports:` bindings: the verifier reaches the SUT over internal Compose DNS,
+# so parallel worktrees never collide on host ports.
+services:
+  sut:
+    build:
+      context: ${CLEAN_REPO_DIR}
+      dockerfile: Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    networks:
+      - holdout-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+
+  verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.verifier
+    depends_on:
+      sut:
+        condition: service_healthy
+    volumes:
+      - ./suites:/holdout/suites:ro
+      - ./fixtures:/holdout/fixtures:ro
+    environment:
+      - SUT_BASE_URL=http://sut:8080
+    networks:
+      - holdout-net
+    # Dockerfile.verifier sets ENTRYPOINT ["pytest"], so this is the argument list only.
+    command: ["-q", "--tb=short", "-p", "no:cacheprovider", "/holdout/suites"]
+
+networks:
+  holdout-net:
+    driver: bridge
+    internal: true

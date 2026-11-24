@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "factory-core"
+version = "2.4.0"
+description = "Shared deterministic engine for the local agentic software factory."
+readme = { text = "Worktree lifecycle, path guard, sealed Docker Compose hold-out gate, and MCP status server.", content-type = "text/plain" }
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+factory-core = "factory_core.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/factory_core"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"../templates/holdout-repo-template" = "factory_core/_templates/holdout-repo-template"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/factory_core", "tests", "pyproject.toml"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../templates/holdout-repo-template" = "src/factory_core/_templates/holdout-repo-template"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["docker: requires a running Docker daemon"]

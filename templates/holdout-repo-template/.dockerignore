@@ -1,0 +1,3 @@
+# The verifier image copies nothing from this directory; suites and fixtures are
+# mounted read-only at run time. Keep them out of the build context.
+*

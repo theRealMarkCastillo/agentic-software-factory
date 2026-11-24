@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$|^apply_patch$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core guard",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^apply_patch$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core holdout-gate",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

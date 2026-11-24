@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "factory-core": {
+      "command": "factory-core",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core worktree init-state --hook",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core guard",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core status --compact-summary",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core status --compact-summary",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "adversarial-critic",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core validate-triage-file",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core holdout-gate",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

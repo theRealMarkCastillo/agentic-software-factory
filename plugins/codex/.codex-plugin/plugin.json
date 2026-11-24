@@ -1,0 +1,19 @@
+{
+  "name": "agentic-software-factory",
+  "version": "2.4.0",
+  "description": "OpenAI Codex integration bundle for local agentic software factory.",
+  "author": {
+    "name": "factory-maintainers"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agentic Software Factory",
+    "shortDescription": "Sealed hold-out gates for local agent work",
+    "longDescription": "Path guard, fast checks, and a sealed Docker Compose hold-out gate backed by the shared factory-core CLI.",
+    "developerName": "factory-maintainers",
+    "category": "Coding",
+    "capabilities": []
+  }
+}

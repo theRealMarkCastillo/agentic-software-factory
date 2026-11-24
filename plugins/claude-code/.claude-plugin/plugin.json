@@ -1,0 +1,15 @@
+{
+  "name": "agentic-software-factory",
+  "version": "2.4.0",
+  "description": "Multi-platform local agentic software factory harness for Claude Code.",
+  "skills": "./skills",
+  "agents": [
+    "./agents/implementer.md",
+    "./agents/adversarial-critic.md"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "author": {
+    "name": "factory-maintainers"
+  }
+}

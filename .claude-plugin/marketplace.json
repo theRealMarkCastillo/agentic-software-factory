@@ -1,0 +1,17 @@
+{
+  "name": "agentic-software-factory",
+  "owner": {
+    "name": "factory-maintainers"
+  },
+  "metadata": {
+    "description": "Local-first agentic software factory with sealed Docker Compose hold-out oracles."
+  },
+  "plugins": [
+    {
+      "name": "agentic-software-factory",
+      "source": "./plugins/claude-code",
+      "description": "Local-first agentic software factory with sealed Docker Compose hold-out oracles.",
+      "version": "2.4.0"
+    }
+  ]
+}
