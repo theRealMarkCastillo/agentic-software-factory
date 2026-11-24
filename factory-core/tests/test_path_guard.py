@@ -407,3 +407,109 @@ def test_critic_cannot_escape_triage_via_path_patch_or_shell(repo):
     assert denied(critic_payload("Bash", {"command": "rm src/app.py"}))
     assert denied(critic_payload("Bash", {"command": "git reset --hard"}))
     assert not denied(critic_payload("Bash", {"command": "git diff && git status --porcelain && git log -n 3"}))
+
+
+def _eval(tool, tool_input, cwd):
+    from factory_core import path_guard
+    return path_guard.evaluate_payload({"tool_name": tool, "cwd": str(cwd), "tool_input": tool_input})
+
+
+@pytest.fixture
+def sealed(home, repo):
+    suites = home / ".factory-holdouts" / "demo-repo" / "suites"
+    suites.mkdir(parents=True)
+    (suites / "test_a.py").write_text("x")
+    return home / ".factory-holdouts"
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Glob", {"pattern": "{home}/.factory-holdouts/**/*.py"}),
+    ("Glob", {"pattern": "{home}/.factory-h*/*/suites/*.py"}),
+    ("Glob", {"pattern": "{home}/.factory-h{{o,x}}ldouts/demo-repo/suites/*"}),
+    ("Glob", {"pattern": "../../home/.factory-h*/**"}),
+    ("Glob", {"pattern": "{home}/**/*.py"}),
+    ("Glob", {"pattern": "**/*.py", "path": "{home}"}),
+    ("Glob", {"pattern": ".factory-h*/*/*/*", "path": "{home}"}),
+    ("Grep", {"pattern": "assert", "path": "{repo}", "glob": "../../home/.factory-h*/**"}),
+    ("find_by_name", {"Pattern": ".factory-h*/**", "SearchDirectory": "{repo}/../../home"}),
+    ("grep_search", {"Query": "assert", "SearchPath": "{repo}", "Includes": ["{home}/.factory-h*/*/*/*.py"]}),
+])
+def test_search_patterns_cannot_enumerate_the_holdouts(sealed, repo, home, tool, tool_input):
+    filled = json.loads(json.dumps(tool_input).replace("{home}", str(home)).replace("{repo}", str(repo)).replace("{{", "{").replace("}}", "}"))
+    allowed, reason = _eval(tool, filled, repo)
+    assert not allowed, reason
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Glob", {"pattern": "**/*.py"}),
+    ("Glob", {"pattern": "src/**/*.{py,pyi}"}),
+    ("Grep", {"pattern": "\\.factory-st.*", "glob": "*.md"}),
+    ("Grep", {"pattern": "def .*\\(", "path": "src"}),
+    ("find_by_name", {"Pattern": "*.py", "SearchDirectory": "src"}),
+])
+def test_ordinary_search_patterns_are_allowed(sealed, repo, tool, tool_input):
+    allowed, reason = _eval(tool, tool_input, repo)
+    assert allowed, reason
+
+
+def test_search_without_a_path_from_a_parent_of_the_holdouts_is_denied(sealed, home):
+    allowed, _ = _eval("Grep", {"pattern": "assert"}, home)
+    assert not allowed
+
+
+@pytest.mark.parametrize("command", [
+    "sudo -u root docker ps",
+    "nice -n 5 docker ps",
+    "env -u FOO docker ps",
+    "env -S 'docker ps'",
+    "xargs -n 1 docker rm",
+    "sh -c \"docker run -v $HOME:/h alpine ls -R /h\"",
+    "bash -lc 'cd /tmp && podman ps'",
+    "eval docker ps",
+    "sh -c 'sh -c \"docker ps\"'",
+])
+def test_container_cli_is_blocked_behind_wrappers_and_nested_shells(repo, command):
+    allowed, reason = _eval("Bash", {"command": command}, repo)
+    assert not allowed and "blocked" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "git clean -fdX",
+    "git clean -xfd",
+    "git -C . clean -ffdx",
+    "git stash --all",
+    "find . -maxdepth 1 -name '.factory-st*' -delete",
+    "find . -name '.factory-state.json' -exec rm {} +",
+    "sh -c 'rm -f .factory-state.j*'",
+    "factory-core worktree init-state",
+])
+def test_commands_that_reset_factory_state_are_blocked(repo, command):
+    allowed, reason = _eval("Bash", {"command": command}, repo)
+    assert not allowed, reason
+
+
+@pytest.mark.parametrize("command", [
+    "git clean -fd",
+    "git stash -u",
+    "find . -name '*.pyc' -delete",
+    "sh -c 'ls -la && git status'",
+    "sudo -u nobody ls",
+    "factory-core status",
+    "cat .factory-state.json",
+])
+def test_ordinary_commands_stay_allowed(repo, command):
+    allowed, reason = _eval("Bash", {"command": command}, repo)
+    assert allowed, reason
+
+
+def test_guard_denies_when_inspection_crashes(repo, monkeypatch, capsys):
+    import io
+
+    from factory_core import path_guard
+
+    def boom(payload):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(path_guard, "evaluate_payload", boom)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"tool_name": "Read", "tool_input": {}})))
+    assert path_guard.main() == 2
+    assert json.loads(capsys.readouterr().out)["decision"] == "deny"

@@ -64,6 +64,17 @@ spec's reference code.
 - **Docker socket.** The guard also covers the sockets of desktop runtimes under the home
   directory (Docker Desktop, OrbStack, Colima, Rancher Desktop) and a `unix://` `DOCKER_HOST`.
 
+- **Gate scope.** A repository without a hold-out suite is not gated (exit 0 with a note on
+  stderr) instead of blocking, because plugins are enabled for every repository. A worktree
+  whose tree still matches its creation baseline is skipped.
+- **Environment failures.** A non-zero Compose exit where the verifier never started does not
+  consume an attempt. It is counted separately (`env_failures`) and ends the loop after three
+  consecutive runs. Prerequisite failures honour `stop_hook_active` on Claude Code and Codex.
+  Unexpected exceptions in the gate or guard block instead of exiting 1.
+- **Attempt ledger.** `record_failure` mirrors attempts and rejected approaches to
+  `attempts-ledger.json` in the hold-out directory. A missing state file is restored from it.
+  `worktree create` and a human `worktree init-state` clear the entry.
+
 ## Not verified locally
 
 - Codex has no plugin validator. Its manifest, hooks, and agent TOML files are checked

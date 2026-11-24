@@ -29,15 +29,22 @@ SUMMARY_LIMIT = 300
 _NORMAL_STOP_REASONS = {"", "model_stop", "no_tool_call"}
 
 
+# Stdin can be read once; the crash handler in main() needs the payload too.
+_last_payload: dict = {}
+
+
 def _read_hook_payload() -> dict:
+    global _last_payload
+    _last_payload = {}
     if sys.stdin.isatty():
         return {}
     try:
         raw = sys.stdin.read()
         parsed = json.loads(raw) if raw.strip() else {}
-        return parsed if isinstance(parsed, dict) else {}
+        _last_payload = parsed if isinstance(parsed, dict) else {}
     except (ValueError, OSError):
-        return {}
+        pass
+    return _last_payload
 
 
 def _agy_allow_stop(**extra: object) -> int:
@@ -134,9 +141,27 @@ def _committed_files_touched(root: Path) -> list[str]:
 
 
 def main(platform: str | None = None) -> int:
+    """Run the gate. Any unexpected error blocks: a crash must never read as a pass."""
+    try:
+        return _run(platform)
+    except Exception as exc:
+        reason = (
+            "Hold-out gate hit an internal error and could not verify the candidate "
+            f"({type(exc).__name__}: {exc}). Fix the cause or ask the human operator, then retry."
+        )
+        if is_antigravity_payload(_last_payload, platform):
+            return _agy_block_stop(
+                reason, continuation_active=bool(_last_payload.get("continuationActive")), status="error"
+            )
+        emit_block(reason, status="error")
+
+
+def _run(platform: str | None = None) -> int:
     hook_payload = _read_hook_payload()
     antigravity = is_antigravity_payload(hook_payload, platform)
     continuation_active = bool(hook_payload.get("continuationActive"))
+    # Claude Code and Codex set this when the agent is already continuing because a Stop hook blocked.
+    stop_hook_active = bool(hook_payload.get("stop_hook_active"))
 
     if antigravity:
         if hook_payload.get("fullyIdle") is False:
@@ -158,6 +183,19 @@ def main(platform: str | None = None) -> int:
         print("factory-core holdout-gate: not a Git repository, nothing to verify.", file=sys.stderr)
         return _agy_allow_stop() if antigravity else EXIT_OK
 
+    try:
+        seal = holdout_dir(root)
+    except FactoryError as exc:
+        return block_env(exc.message)
+    if not (seal / compose_runner.COMPOSE_FILE).is_file():
+        # The plugin is enabled for every repository; only ones that ran `factory-core init` are gated.
+        print(
+            "factory-core holdout-gate: no hold-out suite for this repository, nothing to verify. "
+            "Run `factory-core init` to enable the gate.",
+            file=sys.stderr,
+        )
+        return _agy_allow_stop(status="uninitialized") if antigravity else EXIT_OK
+
     if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=root).returncode == 0:
         root, ambiguity_error = _resolve_gate_root(root)
         if ambiguity_error:
@@ -165,26 +203,34 @@ def main(platform: str | None = None) -> int:
 
     checks = doctor.run_checks()
     if not all(check.ok for check in checks):
-        return block_env(doctor.failure_summary(checks) + "\nStart Docker Engine, then retry.", status="error")
+        summary = doctor.failure_summary(checks)
+        if any(not check.ok and check.name in ("docker", "compose") for check in checks):
+            summary += "\nStart Docker Engine, then retry."
+        if stop_hook_active and not antigravity:
+            # The agent cannot repair the host. Blocking again would loop until a human interrupts.
+            print(
+                f"{summary}\nUNVERIFIED: the hold-out gate could not run. Allowing the stop so the "
+                "session does not loop; fix the prerequisites and rerun `factory-core holdout-gate`.",
+                file=sys.stderr,
+            )
+            return EXIT_OK
+        return block_env(summary, status="error")
 
-    try:
-        seal = holdout_dir(root)
-    except FactoryError as exc:
-        return block_env(exc.message)
-    if not (seal / compose_runner.COMPOSE_FILE).is_file():
-        return block_env(
-            "Hold-out gate is not initialized for this repository. "
-            "Run `factory-core init` in the repository (with Docker running), then retry.",
-            status="uninitialized",
-        )
     if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=root).returncode != 0:
         return block_env("The repository has no commits yet. Create an initial commit, then retry.")
 
     try:
-        state = state_manager.load_state(root) or state_manager.init_state(root, _task_id_from_branch(root))
+        state = state_manager.restore_or_init(root, _task_id_from_branch(root))
         tree_hash = state_manager.compute_tree_hash(root)
     except FactoryError as exc:
         return block_env(f"{exc.message} {exc.remediation}".strip())
+
+    if state.get("base_tree_hash") and state["base_tree_hash"] == tree_hash:
+        # Nothing has changed since the worktree was created (a planning or question turn).
+        if antigravity:
+            return _agy_allow_stop(status="no_changes")
+        print("No candidate changes yet; nothing to verify.")
+        return EXIT_OK
 
     if state_manager.is_verified(state, tree_hash):
         if antigravity:
@@ -223,6 +269,33 @@ def main(platform: str | None = None) -> int:
 
     secrets = report_sanitizer.fixture_secrets(seal / "fixtures")
     sanitized = report_sanitizer.sanitize_output(result.output, seal.name, secrets)
+
+    if not result.verifier_ran and not result.timed_out:
+        # The oracle never ran, so no approach was tested: do not spend an attempt on it.
+        env_failures = state_manager.record_env_failure(root, state)
+        telemetry.record(
+            seal, task_id, int(state["attempts"]), duration_ms, "error", None, tree_hash,
+            platform="antigravity" if antigravity else None,
+        )
+        limit = state_manager.ENV_FAILURE_LIMIT
+        env_report = (
+            f"HOLD-OUT ENVIRONMENT FAILED ({env_failures}/{limit}, not counted as an attempt, "
+            f"{duration_ms / 1000:.1f}s)\n{sanitized}\n"
+            "The verifier container did not start: an image failed to build or pull, or the SUT did not pass "
+            "its :8080/health check. Make sure the Dockerfile builds, includes curl, and serves HTTP 200 on /health."
+        )
+        if env_failures >= limit:
+            env_report += (
+                f"\nUNVERIFIED: the hold-out environment failed {limit} times in a row. "
+                "Halting the retry loop and passing control back to the human operator."
+            )
+            if antigravity:
+                print(env_report, file=sys.stderr)
+                return _agy_allow_stop(status="environment_failed", reason=env_report)
+            print(env_report)
+            return EXIT_OK
+        return block_env(env_report, status="environment_failed")
+
     contracts = report_sanitizer.failed_contracts(result.output)
     failed_contract = contracts[0] if contracts else None
     touched = patch.files or _committed_files_touched(root)
@@ -239,12 +312,6 @@ def main(platform: str | None = None) -> int:
         "Remediation: follow the factory-triage skill. Delegate diagnosis to the adversarial-critic agent, "
         "write .factory-triage.md, then apply a targeted fix. Do not repeat a rejected approach."
     )
-    if not result.verifier_ran and not result.timed_out:
-        hint = (
-            "Note: the verifier container did not start because the candidate SUT image failed to build or "
-            "pass its :8080/health check (ensure Dockerfile builds cleanly, includes curl, and serves HTTP 200 on /health).\n"
-            + hint
-        )
     report = f"{header}\n{sanitized}\n{hint}"
     if state_manager.breaker_tripped(state):
         banner = state_manager.breaker_banner(state)

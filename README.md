@@ -109,7 +109,16 @@ Other commands: `factory-core status [--json|--watch]`, `factory-core mcp` (read
 stdio MCP server), and `factory-core gc [--dry-run] [--max-age-days N]`.
 
 After the circuit breaker trips, a human resets it by deleting `.factory-state.json` in
-the worktree and running `factory-core worktree init-state`.
+the worktree and running `factory-core worktree init-state`. The guard blocks agents from
+running that command, and attempts are mirrored in the hold-out directory, so deleting the
+state file alone does not reset the count.
+
+The gate only runs in repositories that have a hold-out suite. It skips a worktree that has
+not changed since it was created. A run where the verifier never starts (an image fails to
+build, or the SUT fails its health check) is reported as an environment failure and does not
+use an attempt; three in a row end the retry loop with an `UNVERIFIED` notice. When Docker
+itself is unavailable, Claude Code and Codex block the first stop and release the second
+with the same notice, so a session cannot loop on a problem the agent cannot fix.
 
 ## What the guard does and does not guarantee
 

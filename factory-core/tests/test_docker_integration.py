@@ -90,6 +90,7 @@ def test_live_docker_compose_holdout_gate_end_to_end(tmp_path, home, monkeypatch
 
     wt = worktree.create("live-task")
     monkeypatch.chdir(wt)
+    (wt / "NOTES.md").write_text("work in progress\n")  # A pristine worktree is not gated.
 
     # 1. Failing SUT: gate exits 2, redacts fixture secret, increments attempts, cleans up containers
     try:

@@ -104,7 +104,7 @@ def dispatch(args: argparse.Namespace) -> int:
             return EXIT_OK
         if args.hook:
             return worktree.hook_create()
-        root = worktree.init_state()
+        root = worktree.init_state(reset=True)
         print(root)
         return EXIT_OK
     if command == "guard":

@@ -64,6 +64,23 @@ CRITIC_READONLY_PROGS = {
 }
 CRITIC_GIT_READONLY = {"status", "diff", "log", "show", "rev-parse", "ls-files", "branch", "blame", "shortlog", "describe"}
 CRITIC_GIT_MUTATING_BRANCH_FLAGS = {"-d", "-D", "-m", "-M", "-f", "--delete", "--move", "--force", "--copy", "-c", "-C"}
+# Options of command wrappers that consume the next token as their value.
+WRAPPER_VALUE_FLAGS = {
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "-r", "-t"},
+    "nice": {"-n"},
+    "env": {"-u", "-C", "-S"},
+    "xargs": {"-n", "-I", "-L", "-P", "-s", "-d", "-E", "-a"},
+    "time": {"-o", "-f"},
+    "exec": {"-a"},
+}
+# Wrappers that run their remaining arguments as a command, so a container CLI named anywhere after them counts.
+EXEC_WRAPPERS = {"sudo", "env", "nohup", "time", "xargs", "nice", "exec"}
+SHELL_PROGS = {"sh", "bash", "zsh", "dash", "ksh"}
+MAX_NESTED_SHELL_DEPTH = 4
+FIND_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-x", "--exec", "-X", "--exec-batch"}
+# Search-tool arguments that hold a glob rather than a path.
+GLOB_KEYS = {"glob", "include", "includes"}
+PATTERN_IS_GLOB_TOOLS = {"glob", "find_by_name", "list_dir"}
 RAW_MARKERS = (
     (".factory-holdouts", "sealed hold-out directory ~/.factory-holdouts"),
     ("docker.sock", "Docker socket"),
@@ -132,6 +149,57 @@ def violation_for(target: str, cwd: str, recursive: bool = False) -> str | None:
     return None
 
 
+def _glob_parts(path: str) -> list[str]:
+    return [part for part in _fold(path).split(os.sep) if part]
+
+
+def _pattern_violation(pattern: str, base: str) -> str | None:
+    """Return the protected resource a search glob can enumerate, or None.
+
+    The check is structural, so it does not depend on what currently exists on disk.
+    """
+    if not pattern or "\0" in pattern:
+        return None
+    folded = _normalize_for_scan(pattern)
+    for marker, label in RAW_MARKERS:
+        if marker in folded:
+            return label
+    simplified = pattern
+    while True:  # Python's glob has no brace expansion; treat each group as a wildcard.
+        collapsed = re.sub(r"\{[^{}]*\}", "*", simplified)
+        if collapsed == simplified:
+            break
+        simplified = collapsed
+    expanded = os.path.expanduser(os.path.expandvars(simplified))
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(os.path.realpath(base), expanded)
+    parts = _glob_parts(os.path.normpath(expanded))
+
+    # A symlink in the literal prefix may lead into a protected location. Keep the original
+    # case here: the folded parts above are only for comparison.
+    literal: list[str] = []
+    for part in (piece for piece in os.path.normpath(expanded).split(os.sep) if piece):
+        if glob.has_magic(part):
+            break
+        literal.append(part)
+    prefix = os.sep + os.sep.join(literal)
+    prefix_label = violation_for(prefix, base, recursive=any("**" in part for part in parts[len(literal):]))
+    if prefix_label:
+        return prefix_label
+
+    for protected, protected_label in protected_paths():
+        for candidate in {protected, os.path.realpath(protected)}:
+            target = _glob_parts(candidate)
+            for index, part in enumerate(parts):
+                if "**" in part:
+                    return f"{protected_label} (recursive glob through a parent directory)"
+                if index >= len(target):
+                    return protected_label  # The pattern descends below the protected path.
+                if not fnmatch.fnmatchcase(target[index], part):
+                    break
+    return None
+
+
 def _walk_fields(value: Any, key: str = "") -> Iterator[tuple[str, str]]:
     if isinstance(value, dict):
         for child_key, child in value.items():
@@ -187,6 +255,7 @@ def _split_segments(tokens: list[str]) -> list[list[str]]:
 def _segment_program(segment: list[str]) -> tuple[str, list[str]] | None:
     """Return (program_basename, args) for one command segment, skipping env, wrappers, and redirects."""
     index = 0
+    wrapper = ""
     while index < len(segment):
         is_redir, target_idx = _is_redirect_out(segment, index)
         if is_redir:
@@ -197,10 +266,68 @@ def _segment_program(segment: list[str]) -> tuple[str, list[str]] | None:
             index += 1
             continue
         base = os.path.basename(word)
-        if re.match(r"^[A-Za-z_]\w*=", word) or base in COMMAND_WRAPPERS or word.startswith("-"):
+        if base in COMMAND_WRAPPERS:
+            wrapper = base
+            index += 1
+            continue
+        if word.startswith("-"):
+            # `sudo -u root docker` must not read `root` as the program.
+            index += 2 if word in WRAPPER_VALUE_FLAGS.get(wrapper, ()) else 1
+            continue
+        if re.match(r"^[A-Za-z_]\w*=", word):
             index += 1
             continue
         return base, segment[index + 1:]
+    return None
+
+
+def _wrapped_container_cli(segment: list[str]) -> str | None:
+    """A container CLI named anywhere after an exec-style wrapper (covers `env -S "docker ps"`)."""
+    for index, token in enumerate(segment):
+        if os.path.basename(token) in EXEC_WRAPPERS:
+            for later in segment[index + 1:]:
+                for word in later.split():
+                    if os.path.basename(word) in CONTAINER_CLIS:
+                        return os.path.basename(word)
+            return None
+    return None
+
+
+def _nested_script(program: str, args: list[str]) -> str | None:
+    """The shell source a segment hands to another shell: `sh -c '<script>'` or `eval <words>`."""
+    if program == "eval":
+        return " ".join(a for a in args if not _is_operator(a)) or None
+    if program in SHELL_PROGS:
+        for index, arg in enumerate(args[:-1]):
+            if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", arg):
+                return args[index + 1]
+    return None
+
+
+def _git_subcommand(args: list[str]) -> tuple[str, list[str]]:
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"-C", "-c", "--git-dir", "--work-tree"}:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        return arg, args[index + 1:]
+    return "", []
+
+
+def _resets_factory_state(program: str, args: list[str]) -> str | None:
+    """Commands that delete or re-create the ignored state file without naming it."""
+    if program == "git":
+        sub, sub_args = _git_subcommand(args)
+        if sub == "clean" and any(re.match(r"^-[A-Za-z]*[xX]", a) for a in sub_args):
+            return f"'git clean' with -x/-X deletes ignored files, including {STATE_FILE}. Use 'git clean -fd'."
+        if sub == "stash" and any(a in {"-a", "--all"} for a in sub_args):
+            return f"'git stash --all' removes ignored files, including {STATE_FILE}. Use 'git stash -u'."
+    if program == "factory-core" and "init-state" in args:
+        return "Resetting factory state is reserved for the human operator."
     return None
 
 
@@ -290,6 +417,8 @@ def _segment_mutates_state(program: str, args: list[str], seg_cwd: str) -> bool:
         return False
     if program in MUTATING_PROGS:
         return True
+    if program in {"find", "fd"} and any(a in FIND_ACTIONS for a in non_op_args):
+        return True
     if program == "cp":
         positional = [a for a in non_op_args if not a.startswith("-")]
         if positional and any(_touches_state_file(c, seg_cwd) for c in _path_candidates(positional[-1])):
@@ -311,7 +440,7 @@ def _segment_mutates_state(program: str, args: list[str], seg_cwd: str) -> bool:
     return False
 
 
-def _check_command(command: str, cwd: str, critic: bool = False) -> str | None:
+def _check_command(command: str, cwd: str, critic: bool = False, depth: int = 0) -> str | None:
     normalized = _normalize_for_scan(command)
     for marker, label in RAW_MARKERS:
         if marker in normalized:
@@ -330,8 +459,21 @@ def _check_command(command: str, cwd: str, critic: bool = False) -> str | None:
         parsed = _segment_program(segment)
         program, args = parsed if parsed else ("", [])
 
-        if program in CONTAINER_CLIS:
-            return f"Direct '{program}' use is blocked because it can mount the sealed hold-outs. The gate runs containers for you."
+        container = program if program in CONTAINER_CLIS else _wrapped_container_cli(segment)
+        if container:
+            return f"Direct '{container}' use is blocked because it can mount the sealed hold-outs. The gate runs containers for you."
+
+        reset_reason = _resets_factory_state(program, args)
+        if reset_reason:
+            return reset_reason
+
+        nested = _nested_script(program, args)
+        if nested:
+            if depth >= MAX_NESTED_SHELL_DEPTH:
+                return "Shell commands nested this deeply cannot be inspected."
+            nested_reason = _check_command(nested, current_cwd, critic=critic, depth=depth + 1)
+            if nested_reason:
+                return nested_reason
 
         if critic and program:
             critic_err = _critic_allows_segment(program, args)
@@ -425,6 +567,21 @@ def evaluate_payload(payload: dict[str, Any]) -> tuple[bool, str]:
             if tool_name in WRITE_TOOLS and os.path.basename(_resolve(value, cwd)) == STATE_FILE:
                 return False, f"{STATE_FILE} is managed by factory-core and may only be read."
 
+    if recursive_tool:
+        search_bases = [_resolve(v, cwd) for k, v in fields if k in PATH_KEYS and k not in {"cwd", "workdir"}]
+        if not search_bases:
+            # No explicit path: the tool searches the working directory itself.
+            label = violation_for(cwd, cwd, recursive=True)
+            if label:
+                return False, f"Search from '{cwd}' denied: {label}."
+            search_bases = [cwd]
+        for key, value in fields:
+            if key in GLOB_KEYS or (key == "pattern" and tool_name in PATTERN_IS_GLOB_TOOLS):
+                for base in search_bases:
+                    label = _pattern_violation(value, base)
+                    if label:
+                        return False, f"Search pattern '{value}' denied: {label}."
+
     for key, value in fields:
         if key not in COMMAND_KEYS:
             continue
@@ -458,7 +615,10 @@ def main(platform: str | None = None) -> int:
         # A security hook that cannot read its input must not allow the call.
         allowed, reason = False, "Malformed hook payload."
     else:
-        allowed, reason = evaluate_payload(payload)
+        try:
+            allowed, reason = evaluate_payload(payload)
+        except Exception as exc:  # A guard that crashes must not allow the call.
+            allowed, reason = False, f"Guard could not inspect this call ({type(exc).__name__}: {exc})."
 
     antigravity = is_antigravity_payload(payload, platform)
     if allowed:

@@ -111,12 +111,14 @@ def test_third_failure_trips_breaker_and_exits_0(repo, initialized, healthy, ora
     assert sm.load_state(repo)["attempts"] == 3
 
 
-def test_uninitialized_repo_fails_closed(repo, home, healthy, oracle, capsys):
+def test_uninitialized_repo_is_not_gated(repo, home, oracle, monkeypatch, capsys):
+    # The plugin is enabled everywhere; a repository that never ran `factory-core init` must not block,
+    # and must not even need Docker.
+    monkeypatch.setattr(doctor, "run_checks", lambda: [doctor.Check("docker", False, "down", "Start Docker")])
     code, out, err = run_gate(capsys)
-    assert code == 2
+    assert code == 0 and out == ""
     assert "factory-core init" in err
-    assert json.loads(out)["decision"] == "deny"
-    assert oracle.calls == []
+    assert oracle.calls == [] and sm.load_state(repo) is None
 
 
 def test_docker_down_fails_closed_before_anything_else(repo, initialized, oracle, monkeypatch, capsys):
@@ -149,6 +151,7 @@ def test_task_id_and_holdout_dir_come_from_the_main_repo(repo, initialized, heal
     from factory_core import worktree
     path = worktree.create("task-a")
     monkeypatch.chdir(path)
+    (path / "src" / "new.py").write_text("X = 1\n")
     capsys.readouterr()
     code, _, _ = run_gate(capsys)
     assert code == 0
@@ -240,3 +243,115 @@ def test_committed_worktree_failure_records_branch_files_touched(repo, initializ
     assert code == 2
     state = sm.load_state(wt)
     assert state["rejected_approaches"][0]["files_touched"] == ["src/feature.py"]
+
+
+def gate_with_payload(monkeypatch, capsys, payload):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    return run_gate(capsys)
+
+
+def test_docker_down_blocks_once_then_releases_on_stop_hook_active(repo, initialized, oracle, monkeypatch, capsys):
+    checks = [doctor.Check("docker", False, "Docker daemon is not responding", "Start Docker Engine")]
+    monkeypatch.setattr(doctor, "run_checks", lambda: checks)
+    code, _, _ = gate_with_payload(monkeypatch, capsys, {"cwd": str(repo), "stop_hook_active": False})
+    assert code == 2
+    code, out, err = gate_with_payload(monkeypatch, capsys, {"cwd": str(repo), "stop_hook_active": True})
+    assert code == 0 and out == "" and "UNVERIFIED" in err
+    assert oracle.calls == []
+
+
+def test_oracle_failure_still_blocks_when_stop_hook_active(repo, initialized, healthy, oracle, monkeypatch, capsys):
+    oracle.exit_code, oracle.output = 1, FAIL_LOG
+    code, _, _ = gate_with_payload(monkeypatch, capsys, {"cwd": str(repo), "stop_hook_active": True})
+    assert code == 2 and sm.load_state(repo)["attempts"] == 1
+
+
+def test_pristine_worktree_is_not_gated_until_it_changes(repo, initialized, healthy, oracle, capsys, monkeypatch):
+    from factory_core import worktree
+    oracle.exit_code, oracle.output = 1, FAIL_LOG
+    path = worktree.create("task-plan")
+    monkeypatch.chdir(path)
+    (path / ".factory-plan.md").write_text("# Plan\n")  # Planning writes only bookkeeping.
+    capsys.readouterr()
+    for _ in range(4):
+        code, out, _ = run_gate(capsys)
+        assert code == 0 and "nothing to verify" in out
+    assert oracle.calls == [] and sm.load_state(path)["attempts"] == 0
+
+    (path / "src" / "app.py").write_text("VALUE = 2\n")
+    assert run_gate(capsys)[0] == 2
+    assert len(oracle.calls) == 1 and sm.load_state(path)["attempts"] == 1
+
+    # Committing the work still counts as a change from the baseline.
+    git(path, "add", "-A")
+    git(path, "commit", "-q", "-m", "work")
+    assert run_gate(capsys)[0] == 2 and len(oracle.calls) == 2
+
+
+def test_environment_failure_is_not_an_attempt_and_stops_after_the_limit(repo, initialized, healthy, monkeypatch, capsys):
+    calls = []
+
+    def never_started(repo_, patch, holdout_dir, task_id, short_sha, timeout=None):
+        calls.append(1)
+        return compose_runner.GateRun(1, "sut-1  | dependency failed to start", 900, "holdout-x", verifier_ran=False)
+    monkeypatch.setattr(compose_runner, "run_holdout", never_started)
+
+    results = [run_gate(capsys) for _ in range(3)]
+    assert [r[0] for r in results] == [2, 2, 0]
+    assert "HOLD-OUT ENVIRONMENT FAILED (1/3, not counted as an attempt" in results[0][2]
+    assert "UNVERIFIED" in results[2][1]
+    state = sm.load_state(repo)
+    assert state["attempts"] == 0 and state["rejected_approaches"] == [] and state["env_failures"] == 3
+    assert [e["gate_result"] for e in telemetry.read_events(initialized)] == ["error"] * 3
+
+    # A run where the verifier does start clears the streak.
+    monkeypatch.setattr(compose_runner, "run_holdout", FakeOracle(1, FAIL_LOG))
+    assert run_gate(capsys)[0] == 2
+    state = sm.load_state(repo)
+    assert state["attempts"] == 1 and state["env_failures"] == 0
+
+
+def test_unexpected_exception_blocks_instead_of_failing_open(repo, initialized, healthy, monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+    monkeypatch.setattr(compose_runner, "run_holdout", boom)
+    code, out, err = run_gate(capsys)
+    assert code == 2 and "internal error" in err and "disk on fire" in err
+    assert json.loads(out)["decision"] == "deny"
+
+    monkeypatch.setenv("FACTORY_PLATFORM", "antigravity")
+    code, out, _ = run_gate(capsys)
+    assert code == 0 and json.loads(out)["decision"] == "continue"
+
+
+def test_unreadable_file_blocks_with_a_remediation(repo, initialized, healthy, oracle, capsys):
+    secret = repo / "locked.txt"
+    secret.write_text("x")
+    secret.chmod(0)
+    try:
+        code, _, err = run_gate(capsys)
+    finally:
+        secret.chmod(0o600)
+    assert code == 2 and "Cannot read locked.txt" in err and oracle.calls == []
+
+
+def test_deleting_the_state_file_does_not_reset_the_breaker(repo, initialized, healthy, oracle, capsys):
+    oracle.exit_code, oracle.output = 1, FAIL_LOG
+    run_gate(capsys)
+    run_gate(capsys)
+    (repo / ".factory-state.json").unlink()
+    code, out, _ = run_gate(capsys)
+    assert code == 0 and "CIRCUIT BREAKER TRIPPED" in out and "attempt 3/3" in out
+    state = sm.load_state(repo)
+    assert state["attempts"] == 3 and len(state["rejected_approaches"]) == 3
+
+
+def test_human_reset_clears_the_mirrored_attempts(repo, initialized, healthy, oracle, capsys):
+    oracle.exit_code, oracle.output = 1, FAIL_LOG
+    run_gate(capsys)
+    (repo / ".factory-state.json").unlink()
+    assert run_cli(["worktree", "init-state"], cwd=repo).returncode == 0
+    assert sm.load_state(repo)["attempts"] == 0
+    run_gate(capsys)
+    assert sm.load_state(repo)["attempts"] == 1

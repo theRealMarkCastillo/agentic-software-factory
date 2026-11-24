@@ -121,12 +121,19 @@ def create(task_id: str, quiet_stdout: bool = False) -> Path:
         raise FactoryError(f"Worktree {WORKTREES_DIR}/{task_id} already exists.",
                            "Pick another task id or remove it with: factory-core gc")
     git("worktree", "add", "-b", f"factory/{task_id}", str(path), "HEAD", cwd=main_root)
-    state_manager.init_state(path, task_id)
+    state_manager.ledger_clear(path)  # A reused task id must not inherit an old worktree's attempts.
+    state = state_manager.init_state(path, task_id)
+    # The pristine tree is the baseline: the gate has nothing to verify until it changes.
+    state["base_tree_hash"] = state_manager.compute_tree_hash(path)
+    state_manager.save_state(path, state)
     return path
 
 
-def init_state(root: Path | None = None) -> Path:
+def init_state(root: Path | None = None, reset: bool = False) -> Path:
+    """Create state if missing. `reset` is the human operator's path: it also forgets mirrored attempts."""
     root = root or worktree_root()
+    if reset and state_manager.load_state(root) is None:
+        state_manager.ledger_clear(root)
     state_manager.init_state(root, _task_id_from_branch(root))
     return root
 
