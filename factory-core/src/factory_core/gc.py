@@ -21,12 +21,14 @@ from .common import (
     TRIAGE_FILE,
     WORKTREES_DIR,
     FactoryError,
+    is_private_runtime_dir,
     main_repo_root,
     porcelain_paths,
     run,
-    runtime_tmp_dir,
+    runtime_tmp_path,
 )
 
+MANAGED_LABEL = "io.factory-core.holdout=true"
 DEFAULT_MAX_AGE_DAYS = 14
 # Resources younger than this may belong to a gate that is still starting.
 MIN_DOCKER_AGE_SECONDS = 60
@@ -122,10 +124,10 @@ def _is_merged(main_root: Path, path: Path) -> bool:
 
 def _gc_worktrees(main_root: Path, max_age_days: float, report: Report) -> None:
     base = main_root / WORKTREES_DIR
-    if not base.is_dir():
+    if base.is_symlink() or not base.is_dir():
         return
     now = time.time()
-    for path in sorted(p for p in base.iterdir() if p.is_dir()):
+    for path in sorted(p for p in base.iterdir() if not p.is_symlink() and p.is_dir()):
         label = f"{WORKTREES_DIR}/{path.name}"
         merged = _is_merged(main_root, path)
         stale = (now - _last_activity(path)) >= max_age_days * DAY
@@ -195,11 +197,8 @@ def _gc_docker(report: Report) -> None:
         return
     active = {project for project in running if project.startswith("holdout-")}
 
-    def project_of(name: str) -> str:
-        return re.sub(r"_[^_]+$", "", name)
-
     stopped = _docker_lines(["ps", "-a", "--filter", "status=exited", "--filter", "status=created",
-                             "--filter", "label=com.docker.compose.project",
+                             "--filter", f"label={MANAGED_LABEL}",
                              "--format", '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}']) or []
     for line in stopped:
         parts = line.split()
@@ -210,28 +209,29 @@ def _gc_docker(report: Report) -> None:
         if report.dry_run or run(["docker", "rm", "-v", parts[0]]).returncode == 0:
             report.containers.append(parts[1])
 
-    for name in _docker_lines(["network", "ls", "--filter", "name=^holdout-", "--format", "{{.Name}}"]) or []:
-        if project_of(name) in active or _created_age("network", name) < MIN_DOCKER_AGE_SECONDS:
-            continue
-        attached = _docker_lines(["network", "inspect", "--format", "{{len .Containers}}", name])
-        if attached != ["0"]:
-            continue
-        if report.dry_run or run(["docker", "network", "rm", name]).returncode == 0:
-            report.networks.append(name)
-
-    for name in _docker_lines(["volume", "ls", "--filter", "dangling=true", "--filter", "name=^holdout-",
-                               "--format", "{{.Name}}"]) or []:
-        if project_of(name) in active or _created_age("volume", name) < MIN_DOCKER_AGE_SECONDS:
-            continue
-        if report.dry_run or run(["docker", "volume", "rm", name]).returncode == 0:
-            report.volumes.append(name)
+    for kind, extra_filters in (("network", []), ("volume", ["--filter", "dangling=true"])):
+        resources = _docker_lines([kind, "ls", *extra_filters, "--filter", f"label={MANAGED_LABEL}",
+                                   "--format", "{{.ID}} {{.Name}}" if kind == "network" else "{{.Name}}"])
+        for entry in resources or []:
+            fields = entry.split()
+            resource_id, name = fields[0], fields[-1]
+            project = _docker_lines([kind, "inspect", "--format", '{{index .Labels "com.docker.compose.project"}}',
+                                     resource_id])
+            if not project or not project[0].startswith("holdout-") or project[0] in active:
+                continue
+            if _created_age(kind, resource_id) < MIN_DOCKER_AGE_SECONDS:
+                continue
+            if kind == "network" and _docker_lines([kind, "inspect", "--format", "{{len .Containers}}", resource_id]) != ["0"]:
+                continue
+            if report.dry_run or run(["docker", kind, "rm", resource_id]).returncode == 0:
+                (report.networks if kind == "network" else report.volumes).append(name)
 
 
 def _gc_triage(main_root: Path, max_age_days: float, report: Report) -> None:
     candidates = [main_root / TRIAGE_FILE]
     base = main_root / WORKTREES_DIR
-    if base.is_dir():
-        candidates += [p / TRIAGE_FILE for p in base.iterdir() if p.is_dir()]
+    if not base.is_symlink() and base.is_dir():
+        candidates += [p / TRIAGE_FILE for p in base.iterdir() if not p.is_symlink() and p.is_dir()]
     now = time.time()
     for path in candidates:
         try:
@@ -239,6 +239,9 @@ def _gc_triage(main_root: Path, max_age_days: float, report: Report) -> None:
         except OSError:
             continue
         if now - info.st_mtime < max_age_days * DAY:
+            continue
+        tracked = run(["git", "ls-files", "--cached", "--", TRIAGE_FILE], cwd=path.parent)
+        if tracked.returncode or tracked.stdout:
             continue
         report.triage_files.append(str(path.relative_to(main_root)))
         report.reclaimed_bytes += info.st_size
@@ -249,24 +252,24 @@ def _gc_triage(main_root: Path, max_age_days: float, report: Report) -> None:
 def _gc_temp(report: Report) -> None:
     now = time.time()
     uid = os.getuid()
-    seen: set[Path] = set()
-    for base_dir in (runtime_tmp_dir(), Path("/tmp")):
-        resolved_base = base_dir.resolve()
-        if resolved_base in seen or not base_dir.is_dir():
+    base_dir = runtime_tmp_path()
+    if not is_private_runtime_dir(base_dir):
+        return
+    for path in base_dir.iterdir():
+        if not path.name.startswith(("sut-", "idx-")) or path.is_symlink() or not path.is_dir():
             continue
-        seen.add(resolved_base)
-        for pattern in ("sut-*", "idx-*"):
-            for path in base_dir.glob(pattern):
-                try:
-                    info = path.lstat()
-                except OSError:
-                    continue
-                if info.st_uid != uid or now - info.st_mtime < TEMP_MAX_AGE_SECONDS:
-                    continue
-                report.reclaimed_bytes += _tree_size(path) if path.is_dir() else info.st_size
-                report.temp_dirs.append(str(path))
-                if not report.dry_run:
-                    shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
+        try:
+            info = path.lstat()
+            if info.st_uid != uid or now - info.st_mtime < TEMP_MAX_AGE_SECONDS:
+                continue
+            size = _tree_size(path)
+            if not report.dry_run:
+                shutil.rmtree(path)
+        except OSError as exc:
+            report.notes.append(f"Could not clean {path}: {exc}")
+            continue
+        report.reclaimed_bytes += size
+        report.temp_dirs.append(str(path))
 
 
 def collect(dry_run: bool = False, max_age_days: float = DEFAULT_MAX_AGE_DAYS, repo: str | Path | None = None) -> Report:

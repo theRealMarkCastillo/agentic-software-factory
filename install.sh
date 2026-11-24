@@ -102,35 +102,36 @@ install_claude() {
     echo "  /plugin install $PLUGIN@$PLUGIN" >&2
     return 1
   fi
-  claude plugin marketplace add "$ROOT" >/dev/null 2>&1 || claude plugin marketplace update "$PLUGIN" >/dev/null
-  claude plugin install "$PLUGIN@$PLUGIN" >/dev/null
+  claude plugin marketplace add "$ROOT" >/dev/null 2>&1 || claude plugin marketplace update "$PLUGIN" >/dev/null || return 1
+  claude plugin install "$PLUGIN@$PLUGIN" >/dev/null || return 1
   echo "Claude Code: installed $PLUGIN@$PLUGIN"
 }
 
 install_codex() {
   local codex_home="${CODEX_HOME:-$HOME/.codex}"
-  mkdir -p "$codex_home/agents"
-  cp "$ROOT"/plugins/codex/agents/*.toml "$codex_home/agents/"
+  mkdir -p "$codex_home/agents" || return 1
+  cp "$ROOT"/plugins/codex/agents/*.toml "$codex_home/agents/" || return 1
   if ! command -v codex >/dev/null 2>&1; then
     echo "Codex CLI not found. Copied agents to $codex_home/agents. Then run:" >&2
     echo "  codex plugin marketplace add $ROOT && codex plugin add $PLUGIN@$PLUGIN" >&2
     return 1
   fi
-  codex plugin marketplace add "$ROOT" >/dev/null 2>&1 || true
-  codex plugin add "$PLUGIN@$PLUGIN" >/dev/null
+  codex plugin marketplace add "$ROOT" >/dev/null || return 1
+  codex plugin add "$PLUGIN@$PLUGIN" >/dev/null || return 1
   echo "Codex: installed $PLUGIN@$PLUGIN and agents in $codex_home/agents"
   echo "       Approve the hooks trust prompt on first run. See plugins/codex/config/factory.toml."
 }
 
 install_antigravity() {
   local dest="$HOME/.gemini/config/plugins/$PLUGIN"
-  if command -v agy >/dev/null 2>&1 && agy plugin install "$ROOT/plugins/antigravity" >/dev/null 2>&1; then
+  if command -v agy >/dev/null 2>&1; then
+    agy plugin install "$ROOT/plugins/antigravity" >/dev/null || return 1
     echo "Antigravity: installed $PLUGIN with agy"
     return 0
   fi
-  rm -rf "$dest"
-  mkdir -p "$(dirname "$dest")"
-  cp -R "$ROOT/plugins/antigravity" "$dest"
+  rm -rf "$dest" || return 1
+  mkdir -p "$(dirname "$dest")" || return 1
+  cp -R "$ROOT/plugins/antigravity" "$dest" || return 1
   echo "Antigravity: copied plugin to $dest"
 }
 

@@ -4,7 +4,7 @@ import time
 import pytest
 from conftest import git, run_cli
 
-from factory_core import gc, worktree
+from factory_core import common, fast_check, gc, worktree
 from factory_core import state_manager as sm
 
 OLD = time.time() - 30 * 86400
@@ -143,12 +143,21 @@ def test_docker_cleanup_skips_active_and_young_resources(monkeypatch):
     listings = {
         "ps --filter label": ["holdout-live-aaa"],
         "ps -a": ["c1 holdout-dead-bbb-sut-1 holdout-dead-bbb", "c2 holdout-live-aaa-sut-1 holdout-live-aaa", "c3 other-app-1 other"],
-        "network ls": ["holdout-dead-bbb_holdout-net", "holdout-live-aaa_holdout-net", "holdout-young-ccc_holdout-net"],
+        "network ls": ["dead-id holdout-dead-bbb_holdout-net", "live-id custom_svc_network",
+                       "young-id holdout-young-ccc_holdout-net", "unknown-id holdout-other_holdout-net"],
         "network inspect": ["0"],
         "volume ls": ["holdout-dead-bbb_data"],
     }
 
     def fake_lines(args):
+        if args[:2] in (["network", "ls"], ["volume", "ls"], ["ps", "-a"]):
+            assert "label=io.factory-core.holdout=true" in args
+        if args[1] == "inspect" and "com.docker.compose.project" in args[3]:
+            projects = {
+                "dead-id": "holdout-dead-bbb", "live-id": "holdout-live-aaa",
+                "young-id": "holdout-young-ccc", "holdout-dead-bbb_data": "holdout-dead-bbb",
+            }
+            return [projects.get(args[-1], "")]
         joined = " ".join(args)
         for prefix, lines in listings.items():
             if joined.startswith(prefix):
@@ -167,7 +176,61 @@ def test_docker_cleanup_skips_active_and_young_resources(monkeypatch):
     assert report.containers == ["holdout-dead-bbb-sut-1"]
     assert report.networks == ["holdout-dead-bbb_holdout-net"]
     assert report.volumes == ["holdout-dead-bbb_data"]
-    assert ["network", "rm", "holdout-live-aaa_holdout-net"] not in removed
+    assert ["network", "rm", "dead-id"] in removed
+    assert ["network", "rm", "live-id"] not in removed
+
+
+def test_temp_cleanup_only_removes_private_staging_directories(monkeypatch, tmp_path):
+    monkeypatch.undo()
+    monkeypatch.setenv("FACTORY_TMPDIR", str(tmp_path))
+    shared = tmp_path / "sut-other-tool"
+    shared.mkdir()
+    os.utime(shared, (OLD, OLD))
+    report = gc.Report(dry_run=True)
+    gc._gc_temp(report)
+    assert not common.runtime_tmp_path().exists()
+    base = common.runtime_tmp_dir()
+    old = base / "idx-test"
+    old.mkdir()
+    os.utime(old, (OLD, OLD))
+    link = base / "sut-link"
+    link.symlink_to(shared, target_is_directory=True)
+    fresh = base / "sut-fresh"
+    fresh.mkdir()
+    report = gc.Report(dry_run=False)
+    gc._gc_temp(report)
+    assert report.temp_dirs == [str(old)]
+    assert not old.exists()
+    assert shared.is_dir() and link.is_symlink() and fresh.is_dir()
+
+
+@pytest.mark.parametrize("destination", [".factory-plan.md", ".factory-triage.md"])
+def test_staged_rename_into_bookkeeping_is_dirty(repo, destination):
+    path = worktree.create("renamed")
+    git(path, "mv", "README.md", destination)
+    assert common.porcelain_paths(path) == ["README.md"]
+    assert common.porcelain_paths(path, include_internal=True) == [destination, "README.md"]
+    assert fast_check.changed_files(path) == ["README.md"]
+    report = gc.collect(max_age_days=0, repo=repo)
+    assert (path / destination).read_text() == "demo\n" and not report.worktrees
+
+
+def test_unknown_git_status_runs_fast_checks_and_retains_worktree(repo, monkeypatch):
+    path = worktree.create("unknown")
+    original_run = common.run
+
+    def fail_status(args, **kwargs):
+        if args[:2] == ["git", "status"]:
+            raise OSError("git status failed")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(common, "run", fail_status)
+    planned = []
+    monkeypatch.setattr(fast_check, "plan_steps", lambda root: (planned.append(root) or [], []))
+    assert fast_check.main() == 0
+    assert planned == [repo]
+    report = gc.collect(max_age_days=0, repo=repo)
+    assert path.is_dir() and not report.worktrees
 
 
 def test_docker_unavailable_is_reported(monkeypatch):

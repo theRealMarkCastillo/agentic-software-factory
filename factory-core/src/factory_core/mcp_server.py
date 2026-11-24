@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -66,10 +67,16 @@ def _target(arguments: dict[str, Any]) -> Path:
                 )
     task_id = arguments.get("task_id")
     if task_id is None:
-        return worktree_root(base)
+        root = worktree_root(base).resolve()
+        if path_guard.violation_for(str(root), os.getcwd()):
+            raise FactoryError("Access to the protected repository is denied.")
+        return root
     if not isinstance(task_id, str) or not TASK_ID.match(task_id):
         raise FactoryError("task_id must match [A-Za-z0-9][A-Za-z0-9._-]*")
-    path = main_repo_root(base) / WORKTREES_DIR / task_id
+    root = main_repo_root(base).resolve()
+    path = root / WORKTREES_DIR / task_id
+    if path.resolve() != path or path_guard.violation_for(str(path), str(root)):
+        raise FactoryError("Access to the requested worktree is denied.")
     if not path.is_dir():
         raise FactoryError(f"No worktree for task '{task_id}'.")
     return path
@@ -81,9 +88,19 @@ def _status(arguments: dict[str, Any]) -> Any:
 
 def _plan(arguments: dict[str, Any]) -> Any:
     path = _target(arguments) / PLAN_FILE
-    if not path.is_file():
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         return {"present": False, "content": None}
-    content = path.read_text(errors="replace")
+    except OSError as exc:
+        raise FactoryError("Unable to open the plan as a regular worktree file.") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FactoryError("The plan must be a regular worktree file.")
+        with os.fdopen(fd, encoding="utf-8", errors="replace", closefd=False) as stream:
+            content = stream.read(MAX_PLAN_CHARS + 1)
+    finally:
+        os.close(fd)
     return {"present": True, "truncated": len(content) > MAX_PLAN_CHARS, "content": content[:MAX_PLAN_CHARS]}
 
 

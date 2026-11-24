@@ -97,7 +97,7 @@ def test_failed_contracts_extracts_ids_in_order():
         "verifier-1  | FAILED ../holdout/suites/test_contract_example.py::test_health_endpoint_reports_ok - again\n"
     assert failed_contracts(raw) == [
         "test_contract_example.py::test_health_endpoint_reports_ok",
-        "test_orders.py::TestOrders::test_refund[case-1]",
+        "test_orders.py::TestOrders::test_refund",
     ]
 
 
@@ -158,3 +158,17 @@ def test_holdout_conftest_frames_are_stripped():
 def test_cache_sut_paths_are_stripped_before_host_home():
     raw = "COPY failed: /Users/alice/.cache/factory-core/tmp/sut-0f8fad5b-d9cb-469f-a165-70867728950e/src/app.py"
     assert sanitize_output(raw) == "COPY failed: src/app.py"
+
+
+def test_contract_metadata_keeps_only_verifier_identifiers():
+    raw = ("sut-1 | FAILED test_ignored.py::test_untrusted\n"
+           "verifier-1 | FAILED suites/test_order.py::test_send[fixture-value] - error")
+    assert failed_contracts(raw) == ["test_order.py::test_send"]
+    assert "fixture-value" not in sanitize_output(raw)
+
+
+def test_sanitizing_does_not_create_staging_directories(tmp_path, monkeypatch):
+    base = tmp_path / "no-writes"
+    monkeypatch.setenv("FACTORY_TMPDIR", str(base))
+    assert sanitize_output("verifier-1 | ordinary failure") == "ordinary failure"
+    assert not base.exists()

@@ -20,13 +20,10 @@ factory-core = "factory_core.cli:main"
 packages = ["src/factory_core"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"../templates/holdout-repo-template" = "factory_core/_templates/holdout-repo-template"
+"templates/holdout-repo-template" = "factory_core/_templates/holdout-repo-template"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/factory_core", "tests", "pyproject.toml"]
-
-[tool.hatch.build.targets.sdist.force-include]
-"../templates/holdout-repo-template" = "src/factory_core/_templates/holdout-repo-template"
+include = ["src/factory_core", "templates/holdout-repo-template", "tests", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

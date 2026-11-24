@@ -49,7 +49,7 @@ def test_pass_records_hash_and_telemetry(repo, initialized, healthy, oracle, cap
     state = sm.load_state(repo)
     assert state["verified_tree_hash"] == sm.compute_tree_hash(repo)
     assert state["attempts"] == 0
-    assert b"src/new.py" in oracle.calls[0]["patch"]
+    assert b"src/new.py" in oracle.calls[0]["patch"].data
     events = telemetry.read_events(initialized)
     assert len(events) == 1 and events[0]["gate_result"] == "pass" and events[0]["failed_contract_id"] is None
 
@@ -355,3 +355,83 @@ def test_human_reset_clears_the_mirrored_attempts(repo, initialized, healthy, or
     assert sm.load_state(repo)["attempts"] == 0
     run_gate(capsys)
     assert sm.load_state(repo)["attempts"] == 1
+
+
+def test_suite_change_invalidates_cached_verification(repo, initialized, healthy, oracle, capsys):
+    from factory_core import status
+
+    assert run_gate(capsys)[0] == 0
+    (initialized / "fixtures" / "golden.json").write_text('{"expected": 42}')
+    assert status.collect(repo)["verification"].startswith("stale")
+    assert run_gate(capsys)[0] == 0
+    assert len(oracle.calls) == 2
+    assert status.collect(repo)["verification"] == "verified"
+
+
+def test_main_advancing_does_not_redirect_to_pristine_task(repo, initialized, healthy, oracle, capsys):
+    from factory_core import worktree
+
+    wt = worktree.create("untouched")
+    (repo / "README.md").write_text("advanced main")
+    git(repo, "commit", "-qam", "advance main")
+    assert run_gate(capsys)[0] == 0
+    assert len(oracle.calls) == 1
+    assert sm.load_state(wt)["verified_tree_hash"] is None
+    assert sm.load_state(repo)["verified_tree_hash"]
+
+
+def test_corrupt_task_blocks_automatic_selection(repo, initialized, healthy, oracle, capsys):
+    from factory_core import worktree
+
+    wt = worktree.create("damaged")
+    (wt / "README.md").write_text("pending work")
+    (wt / ".factory-state.json").write_text("{")
+    code, _, err = run_gate(capsys)
+    assert code == 2 and "damaged" in err and "corrupt" in err
+    assert not oracle.calls
+
+
+def test_changing_candidate_during_verification_requires_retry(repo, initialized, healthy, monkeypatch, capsys):
+    def edit_during_run(*args):
+        (repo / "README.md").write_text("different from captured snapshot")
+        return compose_runner.GateRun(0, "", 10, "holdout-test")
+
+    monkeypatch.setattr(compose_runner, "run_holdout", edit_during_run)
+    code, _, err = run_gate(capsys)
+    assert code == 2 and "candidate changed" in err
+    assert sm.load_state(repo)["verified_tree_hash"] is None
+
+
+def test_stalled_build_does_not_reject_candidate(repo, initialized, healthy, capsys, monkeypatch):
+    def timeout_before_start(*args):
+        return compose_runner.GateRun(124, "", 20, "holdout-test", timed_out=True, verifier_ran=False)
+
+    monkeypatch.setattr(compose_runner, "run_holdout", timeout_before_start)
+    assert run_gate(capsys)[0] == 2
+    assert sm.load_state(repo)["attempts"] == 0
+
+
+def test_telemetry_write_failure_preserves_gate_feedback(repo, initialized, healthy, oracle, capsys):
+    (initialized / "telemetry.jsonl").mkdir()
+    oracle.exit_code, oracle.output = 1, FAIL_LOG
+    code, out, _ = run_gate(capsys)
+    assert code == 2 and "HOLD-OUT GATE FAILED" in json.loads(out)["reason"]
+    assert sm.load_state(repo)["attempts"] == 1
+
+
+def test_second_gate_cannot_consume_an_attempt_while_first_is_running(repo, initialized, healthy, oracle, capsys):
+    with sm.exclusive_lock(repo / ".git" / "factory-gate.lock"):
+        code, _, err = run_gate(capsys)
+    assert code == 2 and "already running" in err
+    assert sm.load_state(repo) is None and not oracle.calls
+
+
+def test_changing_suite_mid_run_requires_retry(repo, initialized, healthy, monkeypatch, capsys):
+    def change_contract(*args):
+        (initialized / "fixtures" / "golden.json").write_text('{"expected": "changed"}')
+        return compose_runner.GateRun(0, "", 10, "holdout-test")
+
+    monkeypatch.setattr(compose_runner, "run_holdout", change_contract)
+    code, _, err = run_gate(capsys)
+    assert code == 2 and "suite changed" in err
+    assert sm.load_state(repo)["verified_tree_hash"] is None

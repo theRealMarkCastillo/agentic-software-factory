@@ -115,8 +115,8 @@ def plan_steps(root: Path) -> tuple[list[Step], list[str]]:
     return steps, missing
 
 
-def changed_files(root: Path) -> list[str]:
-    return porcelain_paths(root, include_internal=False) or []
+def changed_files(root: Path) -> list[str] | None:
+    return porcelain_paths(root, include_internal=False)
 
 
 def _run_step(step: Step, root: Path, deadline: float) -> tuple[int, str, bool]:
@@ -237,7 +237,7 @@ def main(hook: bool = False, platform: str | None = None, post_invocation: bool 
         else:
             print("OK (0.0s) [not a Git repository]")
         return EXIT_OK
-    if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=root).returncode == 0 and not changed_files(root):
+    if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=root).returncode == 0 and changed_files(root) == []:
         _save_result(root, "ok", 0.0, report=None, pending_injection=False)
         if antigravity:
             print("{}")

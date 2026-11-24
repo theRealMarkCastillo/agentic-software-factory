@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -34,11 +35,28 @@ def holdouts_root() -> Path:
     return Path(os.path.expanduser("~/.factory-holdouts"))
 
 
+def runtime_tmp_path() -> Path:
+    """Return the private staging namespace without touching the filesystem."""
+    base = os.environ.get("FACTORY_TMPDIR")
+    if base:
+        return Path(base).expanduser().absolute() / f"factory-core-{os.getuid()}"
+    return Path.home() / ".cache" / "factory-core" / "tmp"
+
+
+def is_private_runtime_dir(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0
+
+
 def runtime_tmp_dir() -> Path:
-    """Private staging directory under $HOME/.cache (or FACTORY_TMPDIR) for SUT builds and temp indexes."""
-    path = Path(os.path.expanduser(os.environ.get("FACTORY_TMPDIR") or "~/.cache/factory-core/tmp"))
+    """Create the private directory used for SUT builds and temporary indexes."""
+    path = runtime_tmp_path()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
+    if not is_private_runtime_dir(path):
+        raise FactoryError(f"Factory staging directory must be private and owned by the current user: {path}")
     return path
 
 
@@ -73,7 +91,10 @@ def git(*args: str, cwd: str | Path, env: dict[str, str] | None = None) -> str:
 
 def porcelain_paths(cwd: str | Path, include_internal: bool = False) -> list[str] | None:
     """Return paths reported by `git status --porcelain -z`, or None if git status fails."""
-    proc = run(["git", "status", "--porcelain", "-z", "--untracked-files=all"], cwd=cwd, timeout=60)
+    try:
+        proc = run(["git", "status", "--porcelain", "-z", "--untracked-files=all"], cwd=cwd, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     if proc.returncode != 0:
         return None
     tokens = proc.stdout.split(b"\0")
@@ -91,7 +112,7 @@ def porcelain_paths(cwd: str | Path, include_internal: bool = False) -> list[str
         if ("R" in status_xy or "C" in status_xy) and index < len(tokens):
             old_path = tokens[index].decode(errors="surrogateescape")
             index += 1
-            if include_internal and old_path and old_path not in INTERNAL_FILES:
+            if old_path and (include_internal or old_path not in INTERNAL_FILES):
                 paths.append(old_path)
     return paths
 

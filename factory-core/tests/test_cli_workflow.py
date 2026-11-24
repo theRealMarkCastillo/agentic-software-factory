@@ -100,6 +100,15 @@ def test_worktree_create_hook_creates_and_prints_path_last(repo):
     assert git(repo, "status", "--porcelain") == ""
 
 
+@pytest.mark.parametrize("payload", ["", "{", "[]", "{}", '{"name": 42}', '{"name": " "}'])
+def test_worktree_create_hook_requires_a_name_and_leaves_main_untouched(repo, payload):
+    result = run_cli(["worktree", "init-state", "--hook"], cwd=repo, stdin=payload)
+    assert result.returncode != 0
+    assert not result.stdout.strip()
+    assert not (repo / ".factory-state.json").exists()
+    assert not (repo / ".worktrees").exists()
+
+
 def test_worktree_create_hook_failure_is_non_zero(repo):
     worktree.create("taken")
     result = run_cli(["worktree", "init-state", "--hook"], cwd=repo, stdin=json.dumps({"name": "taken"}))
@@ -259,9 +268,9 @@ def test_status_json(repo, initialized):
     assert data["telemetry"]["failed"] == 1
 
 
-def test_status_verification_states(repo):
+def test_status_verification_states(repo, initialized):
     state = sm.init_state(repo, "t")
-    sm.mark_verified(repo, state, sm.compute_tree_hash(repo), "sha")
+    sm.mark_verified(repo, state, sm.compute_tree_hash(repo), "sha", sm.suite_hash(initialized))
     assert status.collect(repo)["verification"] == "verified"
     (repo / "src" / "app.py").write_text("VALUE = 5\n")
     assert status.collect(repo)["verification"].startswith("stale")

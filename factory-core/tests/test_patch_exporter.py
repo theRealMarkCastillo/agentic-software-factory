@@ -1,11 +1,13 @@
 import os
 import shutil
+import subprocess
+from unittest.mock import Mock
 
 import pytest
 from conftest import git
 
 from factory_core import common, compose_runner
-from factory_core.patch_exporter import export_patch
+from factory_core.patch_exporter import compute_candidate_tree, export_patch
 
 
 @pytest.fixture
@@ -160,3 +162,107 @@ def test_filenames_with_spaces_and_unicode(repo):
 def test_project_name_is_compose_safe():
     assert compose_runner.project_name("Task.Verification_01", "ABC1234") == "holdout-task-verification_01-abc1234"
     assert compose_runner.project_name("///", "abc1234") == "holdout-task-abc1234"
+
+
+def test_forced_ignored_file_uses_worktree_bytes_and_preserves_real_index(repo):
+    (repo / ".gitignore").write_text("*.bin\n.factory-state.json\n")
+    (repo / ".factory-state.json").write_text("private")
+    forced = repo / "allowed.bin"
+    forced.write_bytes(b"staged")
+    git(repo, "add", "-f", "--", forced.name)
+    forced.write_bytes(b"current")
+    (repo / "ignored.bin").write_bytes(b"ignore")
+    with_index = (repo / ".git/index").read_bytes()
+
+    patch = export_patch(repo)
+    assert patch.files == [".gitignore", "allowed.bin"]
+    assert git(repo, "show", f"{patch.tree_hash}:allowed.bin") == "current"
+    assert git(repo, "show", ":allowed.bin") == "staged"
+    assert (repo / ".git/index").read_bytes() == with_index
+
+
+def test_read_only_tree_hash_keeps_objects_and_index_unchanged(repo, monkeypatch):
+    (repo / "new.txt").write_text("new candidate")
+    index = (repo / ".git/index").read_bytes()
+    before_objects = sorted((repo / ".git/objects").rglob("*"))
+    monkeypatch.setenv("FACTORY_TMPDIR", str(repo / "no-runtime-cache"))
+    tree = compute_candidate_tree(repo)
+    assert sorted((repo / ".git/objects").rglob("*")) == before_objects
+    assert (repo / ".git/index").read_bytes() == index
+    assert not (repo / "no-runtime-cache").exists()
+    assert export_patch(repo).tree_hash == tree
+
+
+@pytest.mark.parametrize("legacy_bytes", [False, True])
+def test_archive_attributes_keep_files_and_literal_contents(repo, legacy_bytes):
+    (repo / ".gitattributes").write_text("README.md export-ignore\nsrc/app.py export-subst\n")
+    (repo / "src/app.py").write_text('REV = "$Format:%H$"\n')
+    (repo / ".factory-plan.md").write_text("private")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "Set archive attributes and track internal file")
+    (repo / "README.md").write_text("include this edit\n")
+    patch = export_patch(repo)
+
+    assert patch.files == ["README.md"]
+    sut = compose_runner.prepare_sut(repo, patch.data if legacy_bytes else patch)
+    try:
+        assert (sut / "README.md").read_text() == "include this edit\n"
+        assert (sut / "src/app.py").read_text() == 'REV = "$Format:%H$"\n'
+        assert not (sut / ".factory-plan.md").exists()
+    finally:
+        shutil.rmtree(sut)
+
+
+def test_build_uses_captured_contents_after_worktree_and_head_advance(repo):
+    (repo / "src/app.py").write_text("captured\n")
+    patch = export_patch(repo)
+    (repo / "src/app.py").write_text("changed again\n")
+    git(repo, "add", "src/app.py")
+    git(repo, "commit", "-qm", "Advance HEAD")
+    assert patch.head_sha != git(repo, "rev-parse", "HEAD")
+    sut = compose_runner.prepare_sut(repo, patch)
+    try:
+        assert (sut / "src/app.py").read_text() == "captured\n"
+    finally:
+        shutil.rmtree(sut)
+
+
+@pytest.mark.parametrize(("inspect_code", "started_at", "ran"), [
+    (0, b"2026-11-23T00:00:00.000000000Z", True),
+    (0, b"0001-01-01T00:00:00Z", False),
+    (1, b"", False),
+])
+def test_timeout_checks_verifier_and_cleans_only_its_project(tmp_path, monkeypatch, inspect_code, started_at, ran):
+    holdout = tmp_path / "holdout"
+    holdout.mkdir()
+    downs = []
+
+    def prepare(*_):
+        sut = tmp_path / "sut"
+        sut.mkdir()
+        (sut / "Dockerfile").touch()
+        return sut
+
+    def run(args, **kwargs):
+        if "down" in args:
+            downs.append(args[args.index("-p") + 1])
+            return subprocess.CompletedProcess(args, 0, b"")
+        if "ps" in args:
+            return subprocess.CompletedProcess(args, 0, b"verifier-id")
+        assert args[:2] == ["docker", "inspect"]
+        return subprocess.CompletedProcess(args, inspect_code, started_at)
+
+    def launch(*args, **kwargs):
+        proc = Mock(returncode=-9, pid=123)
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("compose", 1), (b"", None)]
+        return proc
+
+    monkeypatch.setattr(compose_runner, "prepare_sut", prepare)
+    monkeypatch.setattr(compose_runner.subprocess, "Popen", launch)
+    monkeypatch.setattr(compose_runner.os, "killpg", lambda *args: None)
+    monkeypatch.setattr(compose_runner, "run", run)
+    first, second = [compose_runner.run_holdout(tmp_path, b"", holdout, "task", "abc", timeout=1) for _ in range(2)]
+    assert first.exit_code == second.exit_code == 124
+    assert first.timed_out and second.timed_out
+    assert first.verifier_ran is ran and second.verifier_ran is ran
+    assert first.project != second.project and downs == [first.project, second.project]

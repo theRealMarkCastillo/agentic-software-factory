@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import secrets
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -89,12 +90,16 @@ def record(
         "tree_hash": tree_hash,
     }
     path = Path(holdout_dir) / "telemetry.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        handle.write(json.dumps(event) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write(json.dumps(event) + "\n")
+    except OSError:
+        print("factory-core: could not append gate telemetry.", file=sys.stderr)
     endpoint = os.environ.get(OTLP_ENV)
     if endpoint:
-        _export_otlp(endpoint, event)
+        with contextlib.suppress(ValueError, OSError):
+            _export_otlp(endpoint, event)
     return event
 
 
@@ -120,7 +125,7 @@ def summarize(holdout_dir: str | Path) -> dict[str, Any]:
     failed = sum(1 for e in events if e.get("gate_result") == "fail")
     first_pass = sum(1 for e in events if e.get("gate_result") == "pass" and e.get("attempt") == 0)
     contracts = Counter(e["failed_contract_id"] for e in events if e.get("failed_contract_id"))
-    durations = [int(e.get("duration_ms", 0)) for e in events]
+    durations = [int(e.get("duration_ms", 0)) for e in events if e.get("gate_result") in {"pass", "fail"}]
     total = passed + failed
     return {
         "runs": total,

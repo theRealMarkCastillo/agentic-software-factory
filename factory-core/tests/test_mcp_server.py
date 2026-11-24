@@ -79,6 +79,26 @@ def test_factory_plan_read(repo):
     assert data["present"] is True and data["content"].startswith("# Plan") and data["truncated"] is False
 
 
+@pytest.mark.parametrize("extra", [0, 1, 250_000])
+def test_factory_plan_truncation_counts_characters(repo, extra):
+    limit = mcp_server.MAX_PLAN_CHARS
+    (repo / ".factory-plan.md").write_text("é" * (limit + extra))
+    _, data = call("factory_plan_read")
+    assert data == {"present": True, "content": "é" * limit, "truncated": bool(extra)}
+
+
+def test_plan_cannot_read_linked_files_or_task_directories(repo, initialized):
+    secret = initialized / ".factory-plan.md"
+    secret.write_text("sealed content")
+    (repo / ".factory-plan.md").symlink_to(secret)
+    tasks = repo / ".worktrees"
+    tasks.mkdir()
+    (tasks / "other").symlink_to(initialized, target_is_directory=True)
+    for arguments in ({}, {"task_id": "other"}):
+        result, message = call("factory_plan_read", arguments)
+        assert result["isError"] and "sealed content" not in message
+
+
 def test_factory_rejected_approaches(repo):
     state = sm.init_state(repo, "t")
     for index in range(3):

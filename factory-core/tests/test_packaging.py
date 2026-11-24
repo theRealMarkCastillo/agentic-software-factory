@@ -242,3 +242,34 @@ def test_install_script_is_executable_and_supports_documented_flags():
     for flag in ("--platform", "--core-only", "claude", "codex", "antigravity", "all"):
         assert flag in text
     assert text.index("docker info") < text.index("uv tool install"), "Docker must be verified before installing"
+
+
+@pytest.mark.parametrize(("platform", "failing_cli", "success"), [
+    ("claude", "claude", "Claude Code: installed"),
+    ("codex", "codex", "Codex: installed"),
+    ("antigravity", "agy", "Antigravity: installed"),
+    ("all", "claude", "Claude Code: installed"),
+])
+def test_install_propagates_plugin_failure(tmp_path, home, platform, failing_cli, success):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    commands = {
+        "docker": 'echo "2.30.0"',
+        "uv": 'ln -s /usr/bin/true "$UV_TOOL_BIN_DIR/factory-core"',
+        "claude": "exit 0",
+        "codex": "exit 0",
+        "agy": "exit 0",
+    }
+    commands[failing_cli] = 'case "$*" in *marketplace*) exit 0 ;; *) exit 17 ;; esac'
+    for command, body in commands.items():
+        path = bin_dir / command
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "install.sh"), "--platform", platform], capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin", "CODEX_HOME": str(home / ".codex")},
+    )
+    assert result.returncode != 0
+    assert success not in result.stdout
+    if platform == "all":
+        assert "Codex: installed" in result.stdout and "Antigravity: installed" in result.stdout

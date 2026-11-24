@@ -48,9 +48,9 @@ def test_save_is_atomic_and_leaves_no_temp_files(repo):
 
 # --- tree hash ------------------------------------------------------------------
 
-def test_tree_hash_is_sha256_and_stable(repo):
+def test_tree_hash_is_git_tree_id_and_stable(repo):
     first = sm.compute_tree_hash(repo)
-    assert re.fullmatch(r"[0-9a-f]{64}", first)
+    assert first == git(repo, "rev-parse", "HEAD^{tree}")
     assert sm.compute_tree_hash(repo) == first
 
 
@@ -178,3 +178,33 @@ def test_breaker_banner_text():
     assert banner[0] == "=" * 80 == banner[-1]
     assert banner[1] == "CIRCUIT BREAKER TRIPPED: Maximum verification attempts (3) reached."
     assert banner[2] == "Halting automated retry loop. Passing control back to human operator."
+
+
+def test_concurrent_tasks_preserve_recovery_entries(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    ledger = tmp_path / sm.LEDGER_FILE
+    monkeypatch.setattr(sm, "_ledger_path", lambda root: ledger)
+    start = Barrier(8)
+
+    def update(index):
+        start.wait()
+        sm._ledger_update(tmp_path / str(index), {"attempts": index})
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(update, range(8)))
+    assert sorted(item["attempts"] for item in sm._ledger_read(ledger).values()) == list(range(8))
+
+
+def test_existing_worktree_keeps_its_legacy_creation_baseline(repo):
+    import hashlib
+
+    legacy = hashlib.sha256()
+    for name in ("Dockerfile", "README.md", "src/app.py"):
+        legacy.update(b"P\0" + name.encode() + b"\0F\0")
+        legacy.update(hashlib.sha256((repo / name).read_bytes()).digest())
+    state = {"base_tree_hash": legacy.hexdigest()}
+    assert sm.is_pristine(repo, state, sm.compute_tree_hash(repo))
+    (repo / "src/app.py").write_text("new work")
+    assert not sm.is_pristine(repo, state, sm.compute_tree_hash(repo))

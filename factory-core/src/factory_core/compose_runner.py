@@ -10,10 +10,12 @@ import signal
 import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import INTERNAL_FILES, FactoryError, run, runtime_tmp_dir
+from .common import FactoryError, run, runtime_tmp_dir
+from .patch_exporter import CandidatePatch, materialize_candidate
 
 COMPOSE_FILE = "docker-compose.holdout.yml"
 DEFAULT_TIMEOUT = 600
@@ -35,28 +37,11 @@ def project_name(task_id: str, short_sha: str) -> str:
     return f"holdout-{slug[:40]}-{short_sha.lower()}"
 
 
-def prepare_sut(repo: str | Path, patch: bytes) -> Path:
-    """Extract HEAD into a private staging dir under runtime_tmp_dir() and apply the candidate patch."""
+def prepare_sut(repo: str | Path, patch: CandidatePatch | bytes) -> Path:
+    """Prepare a private build context from the captured tree or a legacy patch."""
     sut_dir = Path(tempfile.mkdtemp(prefix="sut-", dir=runtime_tmp_dir()))
-    os.chmod(sut_dir, 0o700)
     try:
-        archive = run(["git", "archive", "--format=tar", "HEAD"], cwd=repo, timeout=120)
-        if archive.returncode != 0:
-            raise FactoryError(f"git archive failed: {archive.stderr.decode(errors='replace').strip()}")
-        untar = run(["tar", "-xf", "-", "-C", str(sut_dir)], input_bytes=archive.stdout, timeout=120)
-        if untar.returncode != 0:
-            raise FactoryError(f"Could not extract archive: {untar.stderr.decode(errors='replace').strip()}")
-        if patch.strip():
-            # GIT_CEILING_DIRECTORIES keeps git from adopting an enclosing repository.
-            env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(sut_dir.parent)}
-            applied = run(
-                ["git", "apply", "--binary", "--whitespace=nowarn", "-"],
-                cwd=sut_dir, env=env, input_bytes=patch, timeout=120,
-            )
-            if applied.returncode != 0:
-                raise FactoryError(f"Candidate patch did not apply: {applied.stderr.decode(errors='replace').strip()}")
-        for name in INTERNAL_FILES:
-            (sut_dir / name).unlink(missing_ok=True)
+        materialize_candidate(repo, patch, sut_dir)
     except BaseException:
         shutil.rmtree(sut_dir, ignore_errors=True)
         raise
@@ -72,14 +57,14 @@ def _verifier_started(base: list[str], holdout_dir: str | Path, env: dict[str, s
     if ps.returncode != 0 or not ps.stdout.strip():
         return False
     cid = ps.stdout.decode(errors="replace").strip().splitlines()[0]
-    insp = run(["docker", "inspect", "--format", "{{.State.Status}}", cid], env=env, timeout=15)
-    status_str = insp.stdout.decode(errors="replace").strip().lower()
-    return not (insp.returncode == 0 and status_str == "created")
+    insp = run(["docker", "inspect", "--format", "{{.State.StartedAt}}", cid], env=env, timeout=15)
+    started_at = insp.stdout.decode(errors="replace").strip()
+    return insp.returncode == 0 and re.match(r"^(?!0001-)\d{4}-\d{2}-\d{2}T", started_at) is not None
 
 
 def run_holdout(
     repo: str | Path,
-    patch: bytes,
+    patch: CandidatePatch | bytes,
     holdout_dir: str | Path,
     task_id: str,
     short_sha: str,
@@ -87,7 +72,7 @@ def run_holdout(
 ) -> GateRun:
     """Build, run, and always tear down the oracle. Never publishes host ports."""
     compose_file = Path(holdout_dir) / COMPOSE_FILE
-    project = project_name(task_id, short_sha)
+    project = f"{project_name(task_id, short_sha)}-{uuid.uuid4().hex}"
     limit = timeout if timeout is not None else float(os.environ.get("FACTORY_GATE_TIMEOUT", DEFAULT_TIMEOUT))
     base = _compose_base(project, compose_file)
     sut_dir: Path | None = None
@@ -118,7 +103,10 @@ def run_holdout(
         output = raw.decode(errors="replace")
         if timed_out:
             output += f"\nHold-out gate timed out after {limit:.0f}s."
-        verifier_ran = not timed_out and (process.returncode == 0 or _verifier_started(base, holdout_dir, env))
+        try:
+            verifier_ran = _verifier_started(base, holdout_dir, env)
+        except (OSError, subprocess.SubprocessError):
+            verifier_ran = False
         return GateRun(
             exit_code=124 if timed_out else process.returncode,
             output=output,

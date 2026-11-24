@@ -3,6 +3,8 @@
 # so parallel worktrees never collide on host ports.
 services:
   sut:
+    labels:
+      io.factory-core.holdout: "true"
     build:
       context: ${CLEAN_REPO_DIR}
       dockerfile: Dockerfile
@@ -20,6 +22,8 @@ services:
       retries: 8
 
   verifier:
+    labels:
+      io.factory-core.holdout: "true"
     build:
       context: .
       dockerfile: Dockerfile.verifier
@@ -38,5 +42,7 @@ services:
 
 networks:
   holdout-net:
+    labels:
+      io.factory-core.holdout: "true"
     driver: bridge
     internal: true

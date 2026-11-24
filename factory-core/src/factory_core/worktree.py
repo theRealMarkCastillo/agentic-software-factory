@@ -47,7 +47,7 @@ def template_dir() -> Path:
     packaged = Path(__file__).parent / "_templates" / TEMPLATE_NAME
     if packaged.is_dir():
         return packaged
-    source = Path(__file__).resolve().parents[3] / "templates" / TEMPLATE_NAME
+    source = Path(__file__).resolve().parents[2] / "templates" / TEMPLATE_NAME
     if source.is_dir():
         return source
     raise FactoryError("Hold-out template is missing from this factory-core installation.",
@@ -125,6 +125,7 @@ def create(task_id: str, quiet_stdout: bool = False) -> Path:
     state = state_manager.init_state(path, task_id)
     # The pristine tree is the baseline: the gate has nothing to verify until it changes.
     state["base_tree_hash"] = state_manager.compute_tree_hash(path)
+    state["base_tree_format"] = "git-tree"
     state_manager.save_state(path, state)
     return path
 
@@ -150,11 +151,10 @@ def hook_create() -> int:
         payload = {}
     name = payload.get("name") if isinstance(payload, dict) else None
     try:
-        if isinstance(name, str) and name:
-            task_id = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")[:64]
-            path = create(task_id)
-        else:
-            path = init_state()
+        if not isinstance(name, str) or not name.strip():
+            raise FactoryError("WorktreeCreate requires a non-empty task name.")
+        task_id = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")[:64]
+        path = create(task_id)
     except FactoryError as exc:
         print(f"{exc.message} {exc.remediation}".strip(), file=sys.stderr)
         return 1

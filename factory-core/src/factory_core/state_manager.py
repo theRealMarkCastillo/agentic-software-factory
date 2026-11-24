@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import stat
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import patch_exporter
 from .common import INTERNAL_FILES, STATE_FILE, FactoryError, holdout_dir, run
 
 DEFAULT_MAX_RETRIES = 3
@@ -109,17 +113,21 @@ def _ledger_update(root: str | Path, entry: dict[str, Any] | None) -> None:
         return
     key = os.path.realpath(str(root))
     try:
-        data = _ledger_read(path)
-        if entry is None:
-            if key not in data:
-                return
-            del data[key]
-        else:
-            data[key] = entry
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".attempts-ledger-")
-        with os.fdopen(fd, "w") as handle:
-            json.dump(data, handle, indent=2)
-        os.replace(tmp, path)
+        with exclusive_lock(path.with_suffix(".lock")):
+            data = _ledger_read(path)
+            if entry is None:
+                if key not in data:
+                    return
+                del data[key]
+            else:
+                data[key] = entry
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".attempts-ledger-")
+            try:
+                with os.fdopen(fd, "w") as handle:
+                    json.dump(data, handle, indent=2)
+                os.replace(tmp, path)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
     except OSError:
         pass  # The ledger is a safety net; the worktree state file stays authoritative.
 
@@ -150,46 +158,85 @@ def restore_or_init(root: str | Path, task_id: str) -> dict[str, Any]:
     return state
 
 
-def compute_tree_hash(root: str | Path) -> str:
-    """SHA-256 over paths, modes, and contents of tracked + non-ignored untracked files."""
-    proc = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=root, timeout=60)
-    if proc.returncode != 0:
-        raise FactoryError(f"Could not list files: {proc.stderr.decode(errors='replace').strip()}")
-    names = sorted({n for n in proc.stdout.split(b"\0") if n})
-    digest = hashlib.sha256()
-    base = os.fsencode(str(root))
-    internal = {name.encode() for name in INTERNAL_FILES}
-    for name in names:
-        if name in internal:
-            continue
-        full = os.path.join(base, name)
+@contextmanager
+def exclusive_lock(path: Path, *, wait: bool = True) -> Iterator[None]:
+    with path.open("a") as handle:
         try:
-            info = os.lstat(full)
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError as exc:
+            raise FactoryError("A hold-out gate is already running for this worktree.", "Retry after it finishes.") from exc
+        yield
+
+
+def compute_tree_hash(root: str | Path) -> str:
+    return patch_exporter.compute_candidate_tree(root)
+
+
+def is_pristine(root: Path, state: dict[str, Any], tree_hash: str) -> bool:
+    baseline = state.get("base_tree_hash")
+    if baseline == tree_hash:
+        return True
+    if state.get("base_tree_format") or not isinstance(baseline, str) or len(baseline) != 64:
+        return False
+    # Existing worktrees recorded the SHA-256 of raw working files at creation.
+    # Only this baseline comparison uses their original encoding; passes must be reverified.
+    listing = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=root)
+    if listing.returncode:
+        raise FactoryError("Cannot read the legacy worktree baseline.")
+    digest = hashlib.sha256()
+    excluded = {os.fsencode(name) for name in INTERNAL_FILES}
+    for name in sorted(set(listing.stdout.split(b"\0")) - excluded - {b""}):
+        path = root / os.fsdecode(name)
+        try:
+            mode = path.lstat().st_mode
         except FileNotFoundError:
-            continue  # Deleted from the working tree: absence changes the hash.
+            continue
         digest.update(b"P\0" + name + b"\0")
-        if stat.S_ISLNK(info.st_mode):
-            digest.update(b"L\0" + os.readlink(full) + b"\0")
-        elif stat.S_ISREG(info.st_mode):
-            digest.update(b"X\0" if info.st_mode & 0o111 else b"F\0")
-            file_digest = hashlib.sha256()
-            try:
-                with open(full, "rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        file_digest.update(chunk)
-            except OSError as exc:
-                raise FactoryError(
-                    f"Cannot read {os.fsdecode(name)}: {exc.strerror or exc}",
-                    "Fix its permissions, or remove or ignore the file.",
-                ) from exc
-            digest.update(file_digest.digest())
+        if stat.S_ISLNK(mode):
+            digest.update(b"L\0" + os.fsencode(os.readlink(path)) + b"\0")
+        elif stat.S_ISREG(mode):
+            digest.update(b"X\0" if mode & 0o111 else b"F\0")
+            with path.open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
         else:
-            digest.update(b"D\0")  # Submodule or directory entry.
+            digest.update(b"D\0")
+    return digest.hexdigest() == baseline
+
+
+def suite_hash(seal: Path) -> str:
+    """Fingerprint local oracle inputs, excluding the factory's mutable bookkeeping."""
+    digest = hashlib.sha256()
+    ignored = {LEDGER_FILE, Path(LEDGER_FILE).with_suffix(".lock").name, "telemetry.jsonl", ".git"}
+
+    def visit(directory: Path, ancestors: set[Path]) -> None:
+        for path in sorted(directory.iterdir()):
+            if directory == seal and (path.name in ignored or path.name.startswith(".attempts-ledger-")):
+                continue
+            digest.update(os.fsencode(path.relative_to(seal)) + b"\0")
+            if path.is_symlink():
+                digest.update(b"L" + os.fsencode(os.readlink(path)) + b"\0")
+            if path.is_dir():
+                resolved = path.resolve()
+                if resolved in ancestors:
+                    raise FactoryError("Cannot fingerprint a cycle in the hold-out suite.")
+                digest.update(b"D")
+                visit(path, ancestors | {resolved})
+            elif path.is_file():
+                digest.update((path.stat().st_mode & 0o777).to_bytes(2, "big"))
+                with path.open("rb") as handle:
+                    digest.update(hashlib.file_digest(handle, "sha256").digest())
+            else:
+                raise FactoryError("Cannot fingerprint an unreadable or special file in the hold-out suite.")
+
+    try:
+        visit(seal, {seal.resolve()})
+    except OSError as exc:
+        raise FactoryError("Could not read hold-out verification inputs.", "Check the suite permissions and retry.") from exc
     return digest.hexdigest()
 
 
-def is_verified(state: dict[str, Any], tree_hash: str) -> bool:
-    return state.get("verified_tree_hash") == tree_hash
+def is_verified(state: dict[str, Any], tree_hash: str, oracle_hash: str | None = None) -> bool:
+    return state.get("verified_tree_hash") == tree_hash and state.get("verified_suite_hash") == oracle_hash
 
 
 def breaker_tripped(state: dict[str, Any]) -> bool:
@@ -206,8 +253,9 @@ def breaker_banner(state: dict[str, Any]) -> str:
     )
 
 
-def mark_verified(root: str | Path, state: dict[str, Any], tree_hash: str, head_sha: str) -> None:
+def mark_verified(root: str | Path, state: dict[str, Any], tree_hash: str, head_sha: str, oracle_hash: str | None = None) -> None:
     state["verified_tree_hash"] = tree_hash
+    state["verified_suite_hash"] = oracle_hash
     state["last_evaluated_sha"] = head_sha
     state["env_failures"] = 0
     save_state(root, state)

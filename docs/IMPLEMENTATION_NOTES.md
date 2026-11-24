@@ -43,16 +43,17 @@ spec's reference code.
   breaker banner and exits 0, as acceptance step 9 requires. Later runs also exit 0
   without starting Docker.
 - **Environment failures.** A missing `Dockerfile`, a patch that does not apply, or a
-  stopped daemon exits 2 without consuming an attempt. Candidate SUT build or healthcheck
-  failures during `docker compose up` do count toward the circuit breaker (with explicit
-  startup diagnostics when `verifier` never started) so broken startup code cannot trap
-  `Stop` hooks in an infinite loop.
+  stopped daemon blocks the initial stop. Build, health-check, and timeout failures before
+  verifier startup use a separate environment failure counter. Three consecutive environment
+  failures end the automated loop and report the candidate as unverified.
 - **Teardown.** `docker compose down -v --remove-orphans --rmi local`. Removing the
   per-run images keeps one image per commit from accumulating; BuildKit's layer cache
   keeps rebuilds fast.
 - **Garbage collection.** A worktree with uncommitted changes is never removed. A
   worktree counts as merged only after the gate has evaluated it. Docker resources
-  younger than 60 seconds or belonging to a running project are left alone.
+  must carry the `io.factory-core.holdout=true` label to be eligible for cleanup. This
+  leaves resources from older, unlabeled suites outside automatic Docker garbage collection.
+  Temporary cleanup only considers artifacts inside the private factory staging directory.
 - **Outside a repository.** `holdout-gate` exits 0 with a note when the working directory
   is not a Git repository, so an unrelated session is not trapped by the Stop hook.
 - **fast-check.** Checkers that are not installed are listed in the `OK` line as skipped

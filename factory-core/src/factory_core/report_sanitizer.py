@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from .common import runtime_tmp_dir
+from .common import runtime_tmp_path
 
 MAX_LINES = 60
 SECRET_KEY = re.compile(r"(?i)(api[_-]?key|password|passwd|secret|token|credential)")
@@ -27,7 +27,7 @@ FRAME_PYTEST_BARE = re.compile(
     r"^(?:\S*/)?(?:holdout/suites/|suites/|holdout/)(?P<file>[\w./-]+\.py):\d+:.*$"
 )
 FRAME_PYTHON = re.compile(r'File "(?:[^"]*/)?(?:holdout/suites/|suites/|holdout/)([^"]+\.py)", line \d+, in (\w+)')
-FAILED_ID = re.compile(r"(?:FAILED|ERROR)\s+\S*?([\w-]+\.py::[^\s]+)")
+FAILED_ID = re.compile(r"(?:FAILED|ERROR)\s+\S*?([\w-]+\.py::[\w]+(?:::[\w]+)*)")
 
 
 def _redact_secrets(text: str) -> str:
@@ -86,6 +86,7 @@ def _verifier_lines(raw_text: str) -> list[str]:
 def sanitize_output(raw_text: str, repo_slug: str = "default", secrets: Iterable[str] = ()) -> str:
     lines = _strip_frames(_verifier_lines(raw_text))
     sanitized = "\n".join(lines)
+    sanitized = re.sub(r"(\.py::[\w:]+)\[[^\n]*\](?=\s+-|$)", r"\1", sanitized, flags=re.MULTILINE)
 
     for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
         if len(secret) >= 6:
@@ -97,7 +98,7 @@ def sanitize_output(raw_text: str, repo_slug: str = "default", secrets: Iterable
                 sanitized,
             )
 
-    tmp_dir = str(runtime_tmp_dir())
+    tmp_dir = str(runtime_tmp_path())
     if tmp_dir:
         sanitized = re.sub(rf"{re.escape(tmp_dir)}/sut-[a-f0-9-]+/?", "", sanitized)
         sanitized = re.sub(rf"{re.escape(tmp_dir)}/idx-[^/\s:\"']+(?:/[^\s:\"']*)?", "[TEMP_INDEX]", sanitized)
@@ -118,12 +119,18 @@ def sanitize_output(raw_text: str, repo_slug: str = "default", secrets: Iterable
     return "\n".join(result).strip()
 
 
-def failed_contracts(raw_text: str) -> list[str]:
+def failed_contracts(raw_text: str, secrets: Iterable[str] = ()) -> list[str]:
     """Return contract identifiers such as test_api.py::test_health."""
     found: list[str] = []
-    for contract in FAILED_ID.findall(ANSI.sub("", raw_text)):
-        if contract not in found:
-            found.append(contract)
+    for line in ANSI.sub("", raw_text).splitlines():
+        match = COMPOSE_PREFIX.match(line)
+        if not match or not (match["service"] == "verifier" or match["service"].endswith(("-verifier", "_verifier"))):
+            continue
+        for contract in FAILED_ID.findall(match["line"]):
+            if any(secret and secret in contract for secret in secrets):
+                continue
+            if contract not in found:
+                found.append(contract)
     return found
 
 

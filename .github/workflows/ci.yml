@@ -24,6 +24,10 @@ jobs:
           ./scripts/sync-skills.sh
           git diff --exit-code
 
+      - name: Build source distribution and wheel from it
+        working-directory: factory-core
+        run: uv build
+
       - name: Install factory-core[dev]
         working-directory: factory-core
         run: |

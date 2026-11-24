@@ -38,14 +38,15 @@ def collect(path: str | Path | None = None) -> dict[str, Any]:
         attempts, limit = int(state["attempts"]), int(state["max_retries"])
         try:
             current = state_manager.compute_tree_hash(root)
-        except FactoryError:
-            current = None
+            oracle = state_manager.suite_hash(holdout_dir(root)) if state.get("verified_tree_hash") else None
+        except (FactoryError, OSError):
+            oracle = current = None
         if state.get("verified_tree_hash") is None:
             verification = "unverified"
-        elif state["verified_tree_hash"] == current:
+        elif current and oracle and state_manager.is_verified(state, current, oracle):
             verification = "verified"
         else:
-            verification = "stale (tree changed since last pass)"
+            verification = "stale (candidate or suite changed since last pass)"
         data.update({
             "initialized": True,
             "task_id": state.get("task_id"),

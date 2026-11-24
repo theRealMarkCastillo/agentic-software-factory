@@ -7,7 +7,8 @@ one shared CLI, `factory-core`.
 
 - **Sealed hold-out oracle.** Acceptance tests live in `~/.factory-holdouts/<repo>/`,
   outside the repository. They run in a disposable Docker Compose project against a
-  clean copy of `HEAD` plus the agent's patch.
+  captured Git tree containing the candidate’s tracked and non-ignored untracked files.
+  A cached pass requires the same tree and the same local hold-out inputs.
 - **Sanitized feedback.** A failing run reports the violated contract and the observed
   behavior. Test source, file paths, and fixture secrets are stripped.
 - **Circuit breaker.** Three failed attempts stop the retry loop and hand control back
