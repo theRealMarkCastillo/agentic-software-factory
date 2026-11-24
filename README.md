@@ -23,7 +23,7 @@ exit with code 2 when Docker is unavailable. You also need Python 3.11+ and Git 
 ## Quickstart
 
 ```bash
-git clone https://github.com/<owner>/agentic-software-factory.git
+git clone https://github.com/theRealMarkCastillo/agentic-software-factory.git
 cd agentic-software-factory
 ./install.sh --core-only        # installs factory-core to ~/.local/bin
 factory-core doctor
@@ -45,7 +45,7 @@ Without `uv`, `install.sh` falls back to a virtualenv in `~/.local/share/factory
 You can also install the engine directly:
 
 ```bash
-uv tool install "git+https://github.com/<owner>/agentic-software-factory#subdirectory=factory-core"
+uv tool install "git+https://github.com/theRealMarkCastillo/agentic-software-factory#subdirectory=factory-core"
 ```
 
 ## Install a plugin
@@ -58,14 +58,14 @@ before `factory-core` blocks tool calls until the engine is present.
 Claude Code:
 
 ```
-/plugin marketplace add <owner>/agentic-software-factory
+/plugin marketplace add theRealMarkCastillo/agentic-software-factory
 /plugin install agentic-software-factory@agentic-software-factory
 ```
 
 OpenAI Codex:
 
 ```bash
-codex plugin marketplace add <owner>/agentic-software-factory
+codex plugin marketplace add theRealMarkCastillo/agentic-software-factory
 codex plugin add agentic-software-factory@agentic-software-factory
 ```
 
@@ -75,7 +75,7 @@ Approve the hooks trust prompt on first run. Copy `plugins/codex/agents/*.toml` 
 Google Antigravity:
 
 ```bash
-agy plugin install https://github.com/<owner>/agentic-software-factory/tree/main/plugins/antigravity
+agy plugin install https://github.com/theRealMarkCastillo/agentic-software-factory/tree/main/plugins/antigravity
 agy plugin validate --strict ~/.gemini/config/plugins/agentic-software-factory
 ```
 

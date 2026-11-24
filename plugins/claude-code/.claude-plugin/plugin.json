@@ -10,6 +10,10 @@
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
   "author": {
-    "name": "factory-maintainers"
-  }
+    "name": "theRealMarkCastillo",
+    "url": "https://github.com/theRealMarkCastillo"
+  },
+  "homepage": "https://github.com/theRealMarkCastillo/agentic-software-factory#readme",
+  "repository": "https://github.com/theRealMarkCastillo/agentic-software-factory",
+  "license": "MIT"
 }

@@ -10,7 +10,7 @@ for factory state.
 ## Install
 
 ```
-/plugin install agentic-software-factory --marketplace <owner>/agentic-software-factory
+/plugin install agentic-software-factory --marketplace theRealMarkCastillo/agentic-software-factory
 ```
 
 ## Setup

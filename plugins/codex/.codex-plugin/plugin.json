@@ -3,8 +3,12 @@
   "version": "2.4.0",
   "description": "OpenAI Codex integration bundle for local agentic software factory.",
   "author": {
-    "name": "factory-maintainers"
+    "name": "theRealMarkCastillo",
+    "url": "https://github.com/theRealMarkCastillo"
   },
+  "homepage": "https://github.com/theRealMarkCastillo/agentic-software-factory#readme",
+  "repository": "https://github.com/theRealMarkCastillo/agentic-software-factory",
+  "license": "MIT",
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
