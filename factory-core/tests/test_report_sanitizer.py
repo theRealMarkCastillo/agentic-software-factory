@@ -172,3 +172,14 @@ def test_sanitizing_does_not_create_staging_directories(tmp_path, monkeypatch):
     monkeypatch.setenv("FACTORY_TMPDIR", str(base))
     assert sanitize_output("verifier-1 | ordinary failure") == "ordinary failure"
     assert not base.exists()
+
+
+def test_short_secrets_respect_underscore_boundaries_and_do_not_drop_contract_ids():
+    raw = (
+        "verifier-1  | E   AssertionError: test_auth failed with api token test\n"
+        "verifier-1  | FAILED suites/test_api.py::test_health - AssertionError\n"
+    )
+    out = sanitize_output(raw, secrets={"test", "api"})
+    assert "test_auth failed" in out
+    assert "token [REDACTED_SECRET]" in out
+    assert failed_contracts(raw, secrets={"test", "api"}) == ["test_api.py::test_health"]

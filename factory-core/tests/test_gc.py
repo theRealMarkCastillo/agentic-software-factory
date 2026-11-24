@@ -302,3 +302,19 @@ def test_reverted_worktree_after_pass_is_not_deleted_as_merged(repo):
     report = gc.collect(repo=repo)
     assert path.is_dir() and "factory/reverted" in branches(repo)
     assert report.worktrees == []
+
+
+def test_worktree_committed_after_passing_uncommitted_is_cleaned_up_when_merged(repo):
+    path = worktree.create("post-pass-commit")
+    (path / "src" / "feature.py").write_text("X = 1\n")
+    state = sm.load_state(path)
+    # Verified while edits were uncommitted (last_evaluated_sha == pre-commit HEAD).
+    sm.mark_verified(path, state, sm.compute_tree_hash(path), git(path, "rev-parse", "HEAD"), "oracle")
+    git(path, "add", "-A")
+    git(path, "commit", "-q", "-m", "commit verified tree")
+    git(repo, "merge", "-q", "--ff-only", "factory/post-pass-commit")
+
+    report = gc.collect(repo=repo)
+    assert report.worktrees == [".worktrees/post-pass-commit (merged)"]
+    assert report.branches == ["factory/post-pass-commit"]
+    assert not path.exists() and "factory/post-pass-commit" not in branches(repo)

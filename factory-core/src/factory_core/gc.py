@@ -103,11 +103,10 @@ def _is_merged(main_root: Path, path: Path) -> bool:
     if not state:
         return False
     verified_hash = state.get("verified_tree_hash")
-    last_sha = state.get("last_evaluated_sha")
-    if not isinstance(verified_hash, str) or not verified_hash or not isinstance(last_sha, str) or not last_sha:
+    if not isinstance(verified_hash, str) or not verified_hash:
         return False
     tip = run(["git", "rev-parse", "HEAD"], cwd=path).stdout.decode().strip()
-    if not tip or tip != last_sha:
+    if not tip:
         return False
     try:
         if state_manager.compute_tree_hash(path) != verified_hash:

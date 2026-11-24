@@ -153,27 +153,45 @@ def _glob_parts(path: str) -> list[str]:
     return [part for part in _fold(path).split(os.sep) if part]
 
 
-def _pattern_violation(pattern: str, base: str) -> str | None:
-    """Return the protected resource a search glob can enumerate, or None.
+def _expand_braces(pattern: str) -> list[str]:
+    match = re.search(r"\{([^{}]+)\}", pattern)
+    if not match:
+        return [pattern]
+    options = [opt.strip() for opt in match[1].split(",")]
+    if 1 < len(options) <= 8:
+        expanded: list[str] = []
+        prefix, suffix = pattern[:match.start()], pattern[match.end():]
+        for opt in options:
+            expanded.extend(_expand_braces(f"{prefix}{opt}{suffix}"))
+            if len(expanded) >= 16:
+                return expanded[:16]
+        return expanded
+    collapsed = pattern
+    while True:
+        next_pat = re.sub(r"\{[^{}]*\}", "*", collapsed)
+        if next_pat == collapsed:
+            return [collapsed]
+        collapsed = next_pat
 
-    The check is structural, so it does not depend on what currently exists on disk.
-    """
-    if not pattern or "\0" in pattern:
-        return None
+
+def _single_pattern_violation(pattern: str, base: str) -> str | None:
+    """Return the protected resource one expanded search glob can enumerate, or None."""
     folded = _normalize_for_scan(pattern)
     for marker, label in RAW_MARKERS:
         if marker in folded:
             return label
-    simplified = pattern
-    while True:  # Python's glob has no brace expansion; treat each group as a wildcard.
-        collapsed = re.sub(r"\{[^{}]*\}", "*", simplified)
-        if collapsed == simplified:
-            break
-        simplified = collapsed
-    expanded = os.path.expanduser(os.path.expandvars(simplified))
+    expanded = os.path.expanduser(os.path.expandvars(pattern))
     if not os.path.isabs(expanded):
         expanded = os.path.join(os.path.realpath(base), expanded)
     parts = _glob_parts(os.path.normpath(expanded))
+
+    for idx in range(len(parts) - 1):
+        if (
+            parts[idx].startswith(".")
+            and fnmatch.fnmatchcase(".git", parts[idx])
+            and ("**" in parts[idx + 1] or fnmatch.fnmatchcase("hooks", parts[idx + 1]))
+        ):
+            return "Git hooks directory"
 
     # A symlink in the literal prefix may lead into a protected location. Keep the original
     # case here: the folded parts above are only for comparison.
@@ -197,6 +215,20 @@ def _pattern_violation(pattern: str, base: str) -> str | None:
                     return protected_label  # The pattern descends below the protected path.
                 if not fnmatch.fnmatchcase(target[index], part):
                     break
+    return None
+
+
+def _pattern_violation(pattern: str, base: str) -> str | None:
+    """Return the protected resource a search glob can enumerate, or None.
+
+    The check is structural, so it does not depend on what currently exists on disk.
+    """
+    if not pattern or "\0" in pattern:
+        return None
+    for candidate in _expand_braces(pattern):
+        hit = _single_pattern_violation(candidate, base)
+        if hit:
+            return hit
     return None
 
 
@@ -324,8 +356,19 @@ def _resets_factory_state(program: str, args: list[str]) -> str | None:
         sub, sub_args = _git_subcommand(args)
         if sub == "clean" and any(re.match(r"^-[A-Za-z]*[xX]", a) for a in sub_args):
             return f"'git clean' with -x/-X deletes ignored files, including {STATE_FILE}. Use 'git clean -fd'."
-        if sub == "stash" and any(a in {"-a", "--all"} for a in sub_args):
-            return f"'git stash --all' removes ignored files, including {STATE_FILE}. Use 'git stash -u'."
+        if sub == "stash":
+            skip_next = False
+            for arg in sub_args:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg in {"-m", "--message", "--pathspec-from-file"}:
+                    skip_next = True
+                    continue
+                if arg == "--":
+                    break
+                if arg == "--all" or re.match(r"^-[ukqSp]*a[ukqSp]*$", arg):
+                    return f"'git stash --all' removes ignored files, including {STATE_FILE}. Use 'git stash -u'."
     if program == "factory-core" and "init-state" in args:
         return "Resetting factory state is reserved for the human operator."
     return None

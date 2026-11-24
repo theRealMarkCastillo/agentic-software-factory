@@ -34,7 +34,7 @@ class GateRun:
 def project_name(task_id: str, short_sha: str) -> str:
     """Compose project names allow only lowercase alphanumerics, '-' and '_'."""
     slug = re.sub(r"[^a-z0-9_-]+", "-", task_id.lower()).strip("-_") or "task"
-    return f"holdout-{slug[:40]}-{short_sha.lower()}"
+    return f"holdout-{slug[:28]}-{short_sha.lower()}"
 
 
 def prepare_sut(repo: str | Path, patch: CandidatePatch | bytes) -> Path:
@@ -72,7 +72,7 @@ def run_holdout(
 ) -> GateRun:
     """Build, run, and always tear down the oracle. Never publishes host ports."""
     compose_file = Path(holdout_dir) / COMPOSE_FILE
-    project = f"{project_name(task_id, short_sha)}-{uuid.uuid4().hex}"
+    project = f"{project_name(task_id, short_sha)}-{uuid.uuid4().hex[:12]}"
     limit = timeout if timeout is not None else float(os.environ.get("FACTORY_GATE_TIMEOUT", DEFAULT_TIMEOUT))
     base = _compose_base(project, compose_file)
     sut_dir: Path | None = None

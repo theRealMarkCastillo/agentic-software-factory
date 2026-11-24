@@ -93,7 +93,7 @@ def sanitize_output(raw_text: str, repo_slug: str = "default", secrets: Iterable
             sanitized = sanitized.replace(secret, "[REDACTED_SECRET]")
         else:
             sanitized = re.sub(
-                rf"(?<![A-Za-z0-9]){re.escape(secret)}(?![A-Za-z0-9])",
+                rf"(?<![A-Za-z0-9_]){re.escape(secret)}(?![A-Za-z0-9_])",
                 "[REDACTED_SECRET]",
                 sanitized,
             )
@@ -119,6 +119,14 @@ def sanitize_output(raw_text: str, repo_slug: str = "default", secrets: Iterable
     return "\n".join(result).strip()
 
 
+def _secret_in_contract(contract: str, secret: str) -> bool:
+    if not secret:
+        return False
+    if len(secret) >= 6:
+        return secret in contract
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(secret)}(?![A-Za-z0-9_])", contract) is not None
+
+
 def failed_contracts(raw_text: str, secrets: Iterable[str] = ()) -> list[str]:
     """Return contract identifiers such as test_api.py::test_health."""
     found: list[str] = []
@@ -127,7 +135,7 @@ def failed_contracts(raw_text: str, secrets: Iterable[str] = ()) -> list[str]:
         if not match or not (match["service"] == "verifier" or match["service"].endswith(("-verifier", "_verifier"))):
             continue
         for contract in FAILED_ID.findall(match["line"]):
-            if any(secret and secret in contract for secret in secrets):
+            if any(_secret_in_contract(contract, secret) for secret in secrets):
                 continue
             if contract not in found:
                 found.append(contract)

@@ -112,7 +112,7 @@ def _resolve_gate_root(root: Path, seal: Path) -> tuple[Path, str | None]:
             wt_state = state_manager.load_state(candidate)
         except FactoryError as exc:
             return root, f"Could not inspect task worktree {candidate.name}: {exc.message}"
-        if wt_state and state_manager.is_pristine(candidate, wt_state, wt_hash):
+        if wt_state and int(wt_state["attempts"]) == 0 and not int(wt_state.get("env_failures") or 0) and state_manager.is_pristine(candidate, wt_state, wt_hash):
             continue
         if wt_hash == main_hash:
             continue
@@ -203,6 +203,20 @@ def _run(platform: str | None = None) -> int:
     except FactoryError as exc:
         return block_env(exc.message)
     if not (seal / compose_runner.COMPOSE_FILE).is_file():
+        if seal.exists() or seal.is_symlink():
+            return block_env(
+                f"Hold-out suite at ~/.factory-holdouts/{seal.name} is missing {compose_runner.COMPOSE_FILE}. "
+                "Restore it or rerun `factory-core init`.",
+                status="error",
+            )
+        wt_dir = main_repo_root(root) / WORKTREES_DIR
+        has_worktrees = wt_dir.is_dir() and any(p.is_dir() for p in wt_dir.iterdir())
+        if has_worktrees or any((root / name).exists() for name in INTERNAL_FILES):
+            return block_env(
+                "Factory task artifacts are present, but no hold-out suite is initialized for this repository "
+                "on this host. Run `factory-core init` (with Docker running), then retry.",
+                status="uninitialized",
+            )
         # The plugin is enabled for every repository; only ones that ran `factory-core init` are gated.
         print(
             "factory-core holdout-gate: no hold-out suite for this repository, nothing to verify. "
@@ -248,14 +262,10 @@ def _verify(root: Path, seal: Path, antigravity: bool, block_env: Callable[..., 
     tree_hash = patch.tree_hash
     oracle_hash = state_manager.suite_hash(seal)
 
-    if state_manager.is_pristine(root, state, tree_hash):
-        # Nothing has changed since the worktree was created (a planning or question turn).
-        if antigravity:
-            return _agy_allow_stop(status="no_changes")
-        print("No candidate changes yet; nothing to verify.")
-        return EXIT_OK
-
     if state_manager.is_verified(state, tree_hash, oracle_hash):
+        if state.get("last_evaluated_sha") != patch.head_sha:
+            state["last_evaluated_sha"] = patch.head_sha
+            state_manager.save_state(root, state)
         if antigravity:
             return _agy_allow_stop(status="cached")
         print("Verification cached.")
@@ -266,6 +276,16 @@ def _verify(root: Path, seal: Path, antigravity: bool, block_env: Callable[..., 
             print(banner, file=sys.stderr)
             return _agy_allow_stop(status="circuit_breaker_tripped", reason=banner)
         print(banner)
+        return EXIT_OK
+    if (
+        int(state["attempts"]) == 0
+        and not int(state.get("env_failures") or 0)
+        and state_manager.is_pristine(root, state, tree_hash)
+    ):
+        # Nothing has changed since the worktree was created (a planning or question turn).
+        if antigravity:
+            return _agy_allow_stop(status="no_changes")
+        print("No candidate changes yet; nothing to verify.")
         return EXIT_OK
 
     head_sha = patch.head_sha
@@ -321,7 +341,17 @@ def _verify(root: Path, seal: Path, antigravity: bool, block_env: Callable[..., 
                 return _agy_allow_stop(status="environment_failed", reason=env_report)
             print(env_report)
             return EXIT_OK
-        return block_env(env_report, status="environment_failed")
+        if antigravity:
+            print(env_report, file=sys.stderr)
+            print(json.dumps({
+                "decision": "continue",
+                "reason": env_report,
+                "status": "environment_failed",
+                "env_failures": env_failures,
+                "env_failure_limit": limit,
+            }))
+            return EXIT_OK
+        emit_block(env_report, status="environment_failed", env_failures=env_failures, env_failure_limit=limit)
 
     contracts = report_sanitizer.failed_contracts(result.output, secrets)
     failed_contract = contracts[0] if contracts else None

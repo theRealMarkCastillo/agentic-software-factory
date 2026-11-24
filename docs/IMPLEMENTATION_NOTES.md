@@ -43,9 +43,11 @@ spec's reference code.
   breaker banner and exits 0, as acceptance step 9 requires. Later runs also exit 0
   without starting Docker.
 - **Environment failures.** A missing `Dockerfile`, a patch that does not apply, or a
-  stopped daemon blocks the initial stop. Build, health-check, and timeout failures before
-  verifier startup use a separate environment failure counter. Three consecutive environment
-  failures end the automated loop and report the candidate as unverified.
+  stopped daemon blocks the initial stop (and honors `stop_hook_active` on Claude Code and
+  Codex so sessions do not loop). A non-zero Compose exit where the verifier never started
+  uses a separate `env_failures` counter rather than consuming an attempt; three consecutive
+  environment failures end the automated loop and report the candidate as `UNVERIFIED`.
+  Unexpected exceptions in the gate or guard fail closed instead of exiting 1.
 - **Teardown.** `docker compose down -v --remove-orphans --rmi local`. Removing the
   per-run images keeps one image per commit from accumulating; BuildKit's layer cache
   keeps rebuilds fast.
@@ -65,13 +67,10 @@ spec's reference code.
 - **Docker socket.** The guard also covers the sockets of desktop runtimes under the home
   directory (Docker Desktop, OrbStack, Colima, Rancher Desktop) and a `unix://` `DOCKER_HOST`.
 
-- **Gate scope.** A repository without a hold-out suite is not gated (exit 0 with a note on
+- **Gate scope.** A clean repository without a hold-out suite is not gated (exit 0 with a note on
   stderr) instead of blocking, because plugins are enabled for every repository. A worktree
-  whose tree still matches its creation baseline is skipped.
-- **Environment failures.** A non-zero Compose exit where the verifier never started does not
-  consume an attempt. It is counted separately (`env_failures`) and ends the loop after three
-  consecutive runs. Prerequisite failures honour `stop_hook_active` on Claude Code and Codex.
-  Unexpected exceptions in the gate or guard block instead of exiting 1.
+  whose tree still matches its creation baseline is skipped until it has changes or prior gate
+  activity.
 - **Attempt ledger.** `record_failure` mirrors attempts and rejected approaches to
   `attempts-ledger.json` in the hold-out directory. A missing state file is restored from it.
   `worktree create` and a human `worktree init-state` clear the entry.

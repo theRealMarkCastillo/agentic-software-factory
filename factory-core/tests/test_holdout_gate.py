@@ -435,3 +435,75 @@ def test_changing_suite_mid_run_requires_retry(repo, initialized, healthy, monke
     code, _, err = run_gate(capsys)
     assert code == 2 and "suite changed" in err
     assert sm.load_state(repo)["verified_tree_hash"] is None
+
+
+def test_reverting_to_baseline_after_failure_cannot_bypass_gate_or_breaker(repo, initialized, healthy, oracle, capsys, monkeypatch):
+    from factory_core import worktree
+    oracle.exit_code, oracle.output = 1, FAIL_LOG
+    wt = worktree.create("revert-bypass")
+    monkeypatch.chdir(wt)
+    capsys.readouterr()
+
+    (wt / "src" / "app.py").write_text("VALUE = 2\n")
+    assert run_gate(capsys)[0] == 2
+    assert sm.load_state(wt)["attempts"] == 1
+
+    # Reverting back to base_tree_hash must NOT skip verification as pristine.
+    (wt / "src" / "app.py").write_text("VALUE = 1\n")
+    assert run_gate(capsys)[0] == 2
+    assert sm.load_state(wt)["attempts"] == 2
+    assert run_gate(capsys)[0] == 0
+    assert sm.load_state(wt)["attempts"] == 3
+
+    # Reverting after breaker trips still reports the breaker banner.
+    code, out, _ = run_gate(capsys)
+    assert code == 0 and "CIRCUIT BREAKER TRIPPED" in out
+
+
+def test_antigravity_env_failures_retry_until_limit_even_with_continuation_active(repo, initialized, healthy, monkeypatch, capsys):
+    import io
+
+    def never_started(*args, **kwargs):
+        return compose_runner.GateRun(1, "sut-1  | failed to start", 500, "holdout-x", verifier_ran=False)
+
+    monkeypatch.setattr(compose_runner, "run_holdout", never_started)
+    for num in (1, 2):
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
+            "executionNum": num,
+            "terminationReason": "model_stop",
+            "fullyIdle": True,
+            "continuationActive": True,
+            "workspacePaths": [str(repo)],
+        })))
+        assert holdout_gate.main(platform="antigravity") == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["decision"] == "continue" and body["env_failures"] == num
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
+        "executionNum": 3,
+        "terminationReason": "model_stop",
+        "fullyIdle": True,
+        "continuationActive": True,
+        "workspacePaths": [str(repo)],
+    })))
+    assert holdout_gate.main(platform="antigravity") == 0
+    captured = capsys.readouterr()
+    body = json.loads(captured.out)
+    assert body["decision"] == "stop" and body["status"] == "environment_failed"
+    assert "UNVERIFIED" in captured.err
+
+
+def test_corrupt_seal_or_active_task_without_suite_fails_closed(repo, home, healthy, oracle, capsys):
+    # Partial seal directory missing docker-compose.holdout.yml must block.
+    seal = home / ".factory-holdouts" / repo.name
+    seal.mkdir(parents=True)
+    code, out, err = run_gate(capsys)
+    assert code == 2 and "missing docker-compose.holdout.yml" in err
+    assert json.loads(out)["decision"] == "deny"
+    seal.rmdir()
+
+    # Uninitialized repo that already has active factory artifacts must block.
+    (repo / ".factory-plan.md").write_text("# Plan\n")
+    code, out, err = run_gate(capsys)
+    assert code == 2 and "Factory task artifacts are present" in err
+    assert json.loads(out)["decision"] == "deny"

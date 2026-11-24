@@ -513,3 +513,28 @@ def test_guard_denies_when_inspection_crashes(repo, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"tool_name": "Read", "tool_input": {}})))
     assert path_guard.main() == 2
     assert json.loads(capsys.readouterr().out)["decision"] == "deny"
+
+
+@pytest.mark.parametrize("pattern", [
+    ".git/h*/*",
+    ".g?t/hooks/*",
+    "{.git,src}/hooks/*",
+])
+def test_git_hooks_wildcard_and_brace_globs_are_denied(repo, pattern):
+    allowed, reason = _eval("Glob", {"pattern": pattern}, repo)
+    assert not allowed, reason
+
+
+@pytest.mark.parametrize("command", [
+    "git stash -au",
+    "git stash -ua",
+    'git stash push -au -m "wip"',
+])
+def test_git_stash_combined_all_flags_are_blocked(repo, command):
+    allowed, reason = _eval("Bash", {"command": command}, repo)
+    assert not allowed, reason
+
+
+def test_git_stash_message_containing_dash_a_is_allowed(repo):
+    allowed, reason = _eval("Bash", {"command": 'git stash push -m "-a"'}, repo)
+    assert allowed, reason

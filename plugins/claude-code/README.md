@@ -19,6 +19,7 @@ for factory state.
    Docker Engine and Docker Compose v2 must be running.
 2. Run `factory-core init` in each repository the factory should manage.
 
-The guard and the gate fail closed. Until `factory-core` is installed and the
-repository is initialized they block rather than skip. See the repository README
+The guard fails closed if `factory-core` is missing. Repositories without a hold-out
+suite are skipped until you run `factory-core init`, while initialized repositories
+(and workspaces with active factory task files) fail closed. See the repository README
 and `docs/ARCHITECTURE.md` for the full design.
