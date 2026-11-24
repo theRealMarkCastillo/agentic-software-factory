@@ -13,7 +13,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import EXIT_BLOCK, EXIT_FAIL, EXIT_OK, FactoryError, git, run, worktree_root
+from .common import (
+    EXIT_BLOCK, EXIT_FAIL, EXIT_OK, FactoryError,
+    git, hook_cwd, is_antigravity_payload, run, worktree_root,
+)
 
 TIMEOUT_SECONDS = 15.0
 MAX_OUTPUT_LINES = 40
@@ -143,26 +146,37 @@ def load_result(root: Path) -> dict | None:
         return None
 
 
-def main(hook: bool = False) -> int:
-    """Exit 0 on pass, 1 on failure. In hook mode failures exit 2 on stderr so the agent sees them."""
+def main(hook: bool = False, platform: str | None = None) -> int:
+    """Exit 0 on pass, 1 on failure. In hook mode failures exit 2 on stderr (or {} exit 0 on Antigravity)."""
     started = time.monotonic()
+    payload: dict = {}
     if hook and not sys.stdin.isatty():
         # PostToolBatch has no matcher, so skip batches that edited nothing.
         try:
-            payload = json.loads(sys.stdin.read() or "{}")
+            parsed = json.loads(sys.stdin.read() or "{}")
+            payload = parsed if isinstance(parsed, dict) else {}
         except ValueError:
             payload = {}
-        if isinstance(payload, dict) and payload.get("hook_event_name") == "PostToolBatch":
+        if payload.get("hook_event_name") == "PostToolBatch":
             calls = json.dumps(payload.get("tool_calls", payload))
             if not re.search(r'"(Edit|Write|MultiEdit|NotebookEdit)"', calls):
                 return EXIT_OK
+
+    antigravity = hook and is_antigravity_payload(payload, platform)
+    target_cwd = hook_cwd(payload, prefer_tool_target=True) if payload else None
     try:
-        root = worktree_root()
+        root = worktree_root(target_cwd)
     except FactoryError:
-        print("OK (0.0s) [not a Git repository]")
+        if antigravity:
+            print("{}")
+        else:
+            print("OK (0.0s) [not a Git repository]")
         return EXIT_OK
     if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=root).returncode == 0 and not changed_files(root):
-        print("OK (0.0s)")
+        if antigravity:
+            print("{}")
+        else:
+            print("OK (0.0s)")
         return EXIT_OK
 
     steps, missing = plan_steps(root)
@@ -180,11 +194,18 @@ def main(hook: bool = False) -> int:
             hint = step.hint
         report = "\n".join(part for part in (title, _trim(output), f"Remediation: {hint}") if part)
         _save_result(root, f"failed: {step.name}", duration)
+        if antigravity:
+            print(report, file=sys.stderr)
+            print("{}")
+            return EXIT_OK
         print(report, file=sys.stderr if hook else sys.stdout)
         return EXIT_BLOCK if hook else EXIT_FAIL
 
     duration = time.monotonic() - started
     suffix = f" [skipped, not installed: {', '.join(missing)}]" if missing else ""
     _save_result(root, "ok", duration)
-    print(f"OK ({duration:.1f}s){suffix}")
+    if antigravity:
+        print("{}")
+    else:
+        print(f"OK ({duration:.1f}s){suffix}")
     return EXIT_OK

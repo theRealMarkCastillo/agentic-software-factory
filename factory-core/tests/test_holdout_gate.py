@@ -162,6 +162,49 @@ def test_outside_a_git_repository_is_a_no_op(tmp_path, home):
     assert result.returncode == 0 and "not a Git repository" in result.stderr
 
 
+def test_antigravity_stop_hook_contract_and_workspace_resolution(repo, initialized, healthy, oracle, monkeypatch, capsys, tmp_path):
+    import io
+
+    plugin_root = tmp_path / "plugin-root"
+    plugin_root.mkdir()
+    monkeypatch.chdir(plugin_root)
+    (repo / "src" / "new.py").write_text("X = 1\n")
+
+    def run_agy_stop(payload, exit_code=0, output=""):
+        oracle.exit_code, oracle.output = exit_code, output
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+        code = holdout_gate.main(platform="antigravity")
+        captured = capsys.readouterr()
+        return code, json.loads(captured.out), captured.err
+
+    # 1. Contract failure -> exit 0 with {"decision": "continue"} so Antigravity re-enters the loop
+    code, body, err = run_agy_stop(
+        {"executionNum": 1, "terminationReason": "model_stop", "fullyIdle": True, "workspacePaths": [str(repo)]},
+        exit_code=1, output=FAIL_LOG,
+    )
+    assert code == 0
+    assert body["decision"] == "continue" and body["attempt"] == 1
+    assert "HOLD-OUT GATE FAILED" in body["reason"] and "s3cr3t-fixture-value" not in body["reason"]
+    assert sm.load_state(repo)["attempts"] == 1
+
+    # 2. User cancellation -> allow stop without running oracle
+    calls_before = len(oracle.calls)
+    code, body, _ = run_agy_stop(
+        {"executionNum": 2, "terminationReason": "USER_CANCELED", "fullyIdle": True, "workspacePaths": [str(repo)]},
+        exit_code=1, output=FAIL_LOG,
+    )
+    assert code == 0 and body == {"decision": "stop"} and len(oracle.calls) == calls_before
+
+    # 3. Passing fix -> exit 0 with {"decision": "stop", "status": "ok"}
+    code, body, _ = run_agy_stop(
+        {"executionNum": 3, "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "workspacePaths": [str(repo)]},
+        exit_code=0, output="",
+    )
+    assert code == 0 and body["decision"] == "stop" and body["status"] == "ok"
+    assert sm.load_state(repo)["verified_tree_hash"] is not None
+    assert telemetry.read_events(initialized)[-1]["platform"] == "antigravity"
+
+
 def test_missing_sut_dockerfile_is_reported(repo, initialized, monkeypatch):
     (repo / "Dockerfile").unlink()
     from factory_core.common import FactoryError

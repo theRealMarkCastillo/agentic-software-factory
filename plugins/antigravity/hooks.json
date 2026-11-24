@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core guard",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { msg='BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.'; printf '%s\\n' \"$msg\" >&2; printf '{\"decision\":\"deny\",\"reason\":\"%s\"}\\n' \"$msg\"; exit 0; }; factory-core guard --platform antigravity",
             "timeout": 10
           }
         ]
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v factory-core >/dev/null 2>&1 || exit 0; factory-core fast-check --hook",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { printf '{}\\n'; exit 0; }; factory-core fast-check --hook --platform antigravity",
             "timeout": 30
           }
         ]
@@ -31,7 +31,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "command -v factory-core >/dev/null 2>&1 || { echo 'BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.' >&2; exit 2; }; factory-core holdout-gate",
+        "command": "PATH=\"$HOME/.local/bin:$PATH\"; command -v factory-core >/dev/null 2>&1 || { if grep -q '\"continuationActive\"[[:space:]]*:[[:space:]]*true'; then printf '{\"decision\":\"stop\"}\\n'; else msg='BLOCKED: factory-core is not installed. Run ./install.sh --core-only from the agentic-software-factory repository, then factory-core doctor.'; printf '%s\\n' \"$msg\" >&2; printf '{\"decision\":\"continue\",\"reason\":\"%s\"}\\n' \"$msg\"; fi; exit 0; }; factory-core holdout-gate --platform antigravity",
         "timeout": 900
       }
     ]

@@ -8,6 +8,7 @@ tools:
   - list_dir
   - run_command
   - write_to_file
+mainAgent: false
 subagent: true
 ---
 You are the adversarial critic. You diagnose why the hold-out gate rejected a candidate. You do not fix it.

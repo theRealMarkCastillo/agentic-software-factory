@@ -92,6 +92,60 @@ def holdout_dir(path: str | Path | None = None) -> Path:
     return holdouts_root() / repo_slug(path)
 
 
+def is_antigravity_payload(payload: dict[str, Any], platform: str | None = None) -> bool:
+    """Detect Antigravity's camelCase hook payloads or explicit --platform antigravity."""
+    if platform == "antigravity" or os.environ.get("FACTORY_PLATFORM") == "antigravity":
+        return True
+    return any(
+        key in payload
+        for key in ("toolCall", "workspacePaths", "artifactDirectoryPath", "fullyIdle", "terminationReason")
+    )
+
+
+def extract_tool_call(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Extract (lowercased tool_name, tool_args) across Claude/Codex and Antigravity schemas."""
+    tool_call = payload.get("toolCall")
+    if isinstance(tool_call, dict):
+        name = str(tool_call.get("name", "")).lower()
+        args = tool_call.get("args")
+        return name, args if isinstance(args, dict) else {}
+    name = str(payload.get("tool_name", "")).lower()
+    args = payload.get("tool_input")
+    return name, args if isinstance(args, dict) else {}
+
+
+def hook_cwd(payload: dict[str, Any], prefer_tool_target: bool = False) -> str:
+    """Resolve the workspace/worktree directory from a hook payload.
+
+    Antigravity executes plugin hooks with process cwd set to <plugin-root> rather than
+    the active workspace, passing workspacePaths (and optional toolCall.args.Cwd /
+    TargetFile) on stdin instead.
+    """
+    _, tool_args = extract_tool_call(payload)
+    if prefer_tool_target:
+        for key in ("TargetFile", "AbsolutePath", "file_path", "filePath", "path", "target"):
+            val = tool_args.get(key)
+            if isinstance(val, str) and val.strip():
+                expanded = Path(os.path.expanduser(val))
+                if expanded.is_absolute():
+                    parent = expanded if expanded.is_dir() else expanded.parent
+                    if parent.is_dir():
+                        return str(parent)
+    for key in ("Cwd", "cwd", "workdir"):
+        val = tool_args.get(key)
+        if isinstance(val, str) and val.strip():
+            return os.path.expanduser(val)
+    top_cwd = payload.get("cwd")
+    if isinstance(top_cwd, str) and top_cwd.strip():
+        return os.path.expanduser(top_cwd)
+    workspaces = payload.get("workspacePaths")
+    if isinstance(workspaces, list):
+        for entry in workspaces:
+            if isinstance(entry, str) and entry.strip():
+                return os.path.expanduser(entry)
+    return os.getcwd()
+
+
 def emit_block(reason: str, **extra: Any) -> NoReturn:
     """Report a blocking failure on stderr and stdout JSON, then exit 2."""
     print(reason, file=sys.stderr)

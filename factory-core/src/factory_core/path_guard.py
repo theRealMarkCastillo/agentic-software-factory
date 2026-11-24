@@ -15,7 +15,7 @@ import shlex
 import sys
 from typing import Any, Iterator
 
-from .common import EXIT_BLOCK, EXIT_OK, STATE_FILE, TRIAGE_FILE
+from .common import EXIT_BLOCK, EXIT_OK, STATE_FILE, TRIAGE_FILE, extract_tool_call, hook_cwd, is_antigravity_payload
 
 PATH_KEYS = {
     "file_path", "path", "target", "filepath", "cwd", "notebook_path",
@@ -26,6 +26,7 @@ COMMAND_KEYS = {"command", "commandline", "cmd"}
 SEARCH_TOOLS = {"grep", "glob", "grep_search", "find_by_name", "list_dir"}
 WRITE_TOOLS = {
     "write", "edit", "multiedit", "notebookedit", "apply_patch",
+    "write_file", "edit_file",
     "write_to_file", "replace_file_content", "multi_replace_file_content",
 }
 CONTAINER_CLIS = {"docker", "docker-compose", "podman", "nerdctl"}
@@ -198,9 +199,13 @@ def _check_command(command: str, cwd: str) -> str | None:
 
 
 def evaluate_payload(payload: dict[str, Any]) -> tuple[bool, str]:
-    tool_input = payload.get("tool_input", {})
-    tool_name = str(payload.get("tool_name", "")).lower()
-    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.getcwd()
+    tool_name, tool_input = extract_tool_call(payload)
+    base_cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd").strip() else None
+    if base_cwd is None:
+        workspaces = payload.get("workspacePaths")
+        if isinstance(workspaces, list):
+            base_cwd = next((os.path.expanduser(w) for w in workspaces if isinstance(w, str) and w.strip()), None)
+    cwd = os.path.expanduser(base_cwd) if base_cwd else os.getcwd()
     fields = list(_walk_fields(tool_input))
 
     for key, value in fields:
@@ -244,22 +249,27 @@ def evaluate_payload(payload: dict[str, Any]) -> tuple[bool, str]:
     return True, "Access granted."
 
 
-def main() -> int:
+def main(platform: str | None = None) -> int:
+    payload: dict[str, Any] = {}
     try:
         raw = sys.stdin.read()
-        payload = json.loads(raw)
-        if not isinstance(payload, dict):
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
             raise ValueError("payload must be an object")
+        payload = parsed
     except (ValueError, OSError):
         # A security hook that cannot read its input must not allow the call.
         allowed, reason = False, "Malformed hook payload."
     else:
         allowed, reason = evaluate_payload(payload)
 
+    antigravity = is_antigravity_payload(payload, platform)
     if allowed:
         print(json.dumps({"decision": "allow"}))
         return EXIT_OK
     message = f"BLOCKED by Factory Security Guard: {reason}"
     print(message, file=sys.stderr)
     print(json.dumps({"decision": "deny", "reason": message}))
-    return EXIT_BLOCK
+    # Antigravity treats any non-zero hook exit code as an error and fails open;
+    # exit 0 with {"decision": "deny"} enforces the hard block.
+    return EXIT_OK if antigravity else EXIT_BLOCK

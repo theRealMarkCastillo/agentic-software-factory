@@ -11,7 +11,8 @@ spec's reference code.
 | --- | --- | --- |
 | Hooks as a flat list of `{event, matcher, command}` | Claude Code and Codex: `{"hooks": {"<Event>": [{"matcher", "hooks": [{"type": "command", ...}]}]}}` | The flat form is not a schema either harness loads. |
 | Antigravity `hooks.json` shaped like Claude Code's | Named hooks at the top level; `Stop` takes a flat handler list | `agy` reads a top-level `hooks` key as one hook named "hooks" and skips the file. |
-| Antigravity `plugin.json` with `skills`, `rules`, `agents`, `hooks`, `mcp` | Those fields removed | `agy` reports each as an unknown, ignored field, which fails `--strict`. Components are discovered by directory. |
+| Antigravity hook exit codes, payload schema, and working directory | Hooks exit `0` with stdout JSON (`{"decision":"deny"}` on `PreToolUse`, `{}` on `PostToolUse`, `{"decision":"continue"}` / `{"decision":"stop"}` on `Stop`) and resolve the workspace from `toolCall.args` / `workspacePaths` | Antigravity runs plugin hooks from `<plugin-root>`, wraps tool calls in `toolCall.{name,args}`, and treats any non-zero exit code as a hook error that fails open. |
+| Antigravity `plugin.json` with `skills`, `rules`, `agents`, `hooks`, `mcp` | Those fields removed; `$schema`, `logo`, and `suggestedPrompts` added | `agy` reports unknown component-path fields as ignored, which fails `--strict`. Components are discovered by directory. |
 | Claude `"agents": "./agents"` | A list of the two agent files | The field accepts files, not a directory. |
 | Codex files under `.codex/` | `hooks/hooks.json`, `agents/*.toml`, `config/factory.toml` | Layout requested for this build. `.agents/plugins/marketplace.json` was added so `codex plugin marketplace add` works. |
 | Codex critic `read_only = true` | `sandbox_mode = "read-only"`; the calling agent saves the critic's analysis to `.factory-triage.md` | A read-only agent cannot also write the triage file. |

@@ -77,11 +77,12 @@ def record(
     gate_result: str,
     failed_contract_id: str | None,
     tree_hash: str,
+    platform: str | None = None,
 ) -> dict[str, Any]:
     event = {
         "timestamp": utc_now(),
         "task_id": task_id,
-        "platform": detect_platform(),
+        "platform": platform or detect_platform(),
         "attempt": attempt,
         "duration_ms": duration_ms,
         "gate_result": gate_result,

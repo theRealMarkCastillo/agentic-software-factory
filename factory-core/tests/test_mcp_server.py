@@ -107,6 +107,21 @@ def test_task_id_argument_selects_a_worktree(repo):
     assert status["task_id"] == "task-b" and status["branch"] == "factory/task-b"
 
 
+def test_repo_path_argument_works_when_mcp_server_runs_from_plugin_dir(repo, home, tmp_path, monkeypatch):
+    seal = home / ".factory-holdouts" / "demo-repo"
+    seal.mkdir(parents=True)
+    path = worktree.create("task-ext")
+    (path / ".factory-plan.md").write_text("external plan")
+    plugin_root = tmp_path / "plugin-root"
+    plugin_root.mkdir()
+    monkeypatch.chdir(plugin_root)
+
+    _, data = call("factory_plan_read", {"repo_path": str(repo), "task_id": "task-ext"})
+    assert data["content"] == "external plan"
+    denied_res, text = call("factory_plan_read", {"repo_path": str(seal)})
+    assert denied_res["isError"] is True and "hold-out" in text
+
+
 @pytest.mark.parametrize("task_id", ["../../etc", "/etc/passwd", "a/b", "", 7, "~/.factory-holdouts"])
 def test_task_id_cannot_escape_the_worktrees_directory(repo, task_id):
     result, text = call("factory_plan_read", {"task_id": task_id})

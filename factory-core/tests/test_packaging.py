@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import tomllib
 
 import pytest
@@ -101,7 +103,7 @@ def test_codex_and_antigravity_hook_bindings():
     assert matcher == "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content|grep_search|find_by_name"
 
 
-@pytest.mark.parametrize("path", ["plugins/claude-code/hooks/hooks.json", "plugins/codex/hooks/hooks.json", "plugins/antigravity/hooks.json"])
+@pytest.mark.parametrize("path", ["plugins/claude-code/hooks/hooks.json", "plugins/codex/hooks/hooks.json"])
 def test_guard_and_gate_fail_closed_when_factory_core_is_missing(path):
     found = {"guard": False, "holdout-gate": False}
     for command in commands(load(path)):
@@ -110,6 +112,52 @@ def test_guard_and_gate_fail_closed_when_factory_core_is_missing(path):
                 found[name] = True
                 assert "exit 2" in command and "not installed" in command
     assert all(found.values())
+
+
+def test_antigravity_hooks_fail_closed_with_exit_0_json_when_factory_core_is_missing(tmp_path):
+    hooks = load("plugins/antigravity/hooks.json")
+    guard_cmd = hooks["factory-guard"]["PreToolUse"][0]["hooks"][0]["command"]
+    fast_cmd = hooks["factory-fast-check"]["PostToolUse"][0]["hooks"][0]["command"]
+    gate_cmd = hooks["factory-holdout-gate"]["Stop"][0]["command"]
+    assert "factory-core guard --platform antigravity" in guard_cmd
+    assert "factory-core fast-check --hook --platform antigravity" in fast_cmd
+    assert "factory-core holdout-gate --platform antigravity" in gate_cmd
+
+    empty_home = tmp_path / "empty-home"
+    empty_home.mkdir()
+    env = {"HOME": str(empty_home), "PATH": "/usr/bin:/bin"}
+
+    guard_res = subprocess.run(["sh", "-c", guard_cmd], input="{}", text=True, capture_output=True, env=env, check=False)
+    assert guard_res.returncode == 0
+    guard_json = json.loads(guard_res.stdout)
+    assert guard_json["decision"] == "deny" and "not installed" in guard_json["reason"]
+
+    fast_res = subprocess.run(["sh", "-c", fast_cmd], input="{}", text=True, capture_output=True, env=env, check=False)
+    assert fast_res.returncode == 0 and json.loads(fast_res.stdout) == {}
+
+    gate_res = subprocess.run(["sh", "-c", gate_cmd], input='{"fullyIdle": true}', text=True, capture_output=True, env=env, check=False)
+    assert gate_res.returncode == 0
+    gate_json = json.loads(gate_res.stdout)
+    assert gate_json["decision"] == "continue" and "not installed" in gate_json["reason"]
+
+    gate_loop = subprocess.run(
+        ["sh", "-c", gate_cmd], input='{"fullyIdle": true, "continuationActive": true}',
+        text=True, capture_output=True, env=env, check=False,
+    )
+    assert gate_loop.returncode == 0 and json.loads(gate_loop.stdout) == {"decision": "stop"}
+
+
+@pytest.mark.skipif(shutil.which("agy") is None, reason="agy CLI not installed")
+def test_antigravity_plugin_passes_agy_strict_validation():
+    proc = subprocess.run(
+        ["agy", "plugin", "validate", "--strict", "--json", str(PLUGINS / "antigravity")],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    report = json.loads(proc.stdout)
+    assert report["name"] == "agentic-software-factory"
+    assert report["components"] == {"agents": 2, "hooks": 3, "mcpServers": 1, "rules": 1, "sidecars": 0, "skills": 3}
+    assert report["findings"] == []
 
 
 @pytest.mark.parametrize("path", ["plugins/claude-code/.mcp.json", "plugins/codex/.mcp.json", "plugins/antigravity/mcp_config.json"])

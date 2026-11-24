@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-from . import __version__, status, telemetry
+from . import __version__, path_guard, status, telemetry
 from .common import PLAN_FILE, WORKTREES_DIR, FactoryError, holdout_dir, main_repo_root, worktree_root
 from .worktree import TASK_ID
 
@@ -19,21 +20,34 @@ _TASK_ARG = {
     "properties": {
         "task_id": {
             "type": "string",
-            "description": "Optional task id under .worktrees/. Defaults to the server's working directory.",
-        }
+            "description": "Optional task id under .worktrees/. Defaults to the active worktree.",
+        },
+        "repo_path": {
+            "type": "string",
+            "description": "Optional path to the Git repository or worktree when the MCP server runs outside it.",
+        },
     },
     "additionalProperties": False,
 }
 
 
 def _target(arguments: dict[str, Any]) -> Path:
-    """Resolve the worktree to inspect. Only .worktrees/<task-id> is reachable."""
+    """Resolve the worktree to inspect. Protected paths are never reachable."""
+    repo_arg = arguments.get("repo_path")
+    base: str | Path | None = None
+    if repo_arg is not None:
+        if not isinstance(repo_arg, str) or not repo_arg.strip():
+            raise FactoryError("repo_path must be a non-empty path string.")
+        label = path_guard.violation_for(repo_arg, os.getcwd())
+        if label:
+            raise FactoryError(f"Access to '{repo_arg}' denied: {label}.")
+        base = os.path.expanduser(repo_arg)
     task_id = arguments.get("task_id")
     if task_id is None:
-        return worktree_root()
+        return worktree_root(base)
     if not isinstance(task_id, str) or not TASK_ID.match(task_id):
         raise FactoryError("task_id must match [A-Za-z0-9][A-Za-z0-9._-]*")
-    path = main_repo_root() / WORKTREES_DIR / task_id
+    path = main_repo_root(base) / WORKTREES_DIR / task_id
     if not path.is_dir():
         raise FactoryError(f"No worktree for task '{task_id}'.")
     return path

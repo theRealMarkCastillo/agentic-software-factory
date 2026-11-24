@@ -1,11 +1,19 @@
 {
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "agentic-software-factory",
   "displayName": "Agentic Software Factory",
   "version": "2.4.0",
-  "description": "Google Antigravity IDE and CLI harness extension.",
+  "description": "Isolated Git worktree workflow, path guards, fast architectural checks, and sealed Docker Compose hold-out verification for coding agents.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Create a .factory-plan.md specification for the current task",
+    "Check current factory worktree status and hold-out attempt history",
+    "Triage the latest hold-out contract failure and write .factory-triage.md"
+  ],
   "author": {
     "name": "factory-maintainers"
   },
+  "license": "MIT",
   "keywords": [
     "factory",
     "hold-out",

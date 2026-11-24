@@ -9,24 +9,27 @@ import re
 import sys
 
 from . import __version__, doctor, fast_check, gc, holdout_gate, mcp_server, path_guard, status, worktree
-from .common import EXIT_BLOCK, EXIT_OK, TRIAGE_FILE, FactoryError, worktree_root
+from .common import EXIT_BLOCK, EXIT_OK, TRIAGE_FILE, FactoryError, hook_cwd, worktree_root
 
 TRIAGE_SECTIONS = ("Root Cause Analysis", "Unmet Behavioral Contract Clause", "Target Modification Strategy")
 CRITIC_AGENT = "adversarial-critic"
+PLATFORMS = ("claude", "codex", "antigravity")
 
 
 def validate_triage_file() -> int:
     """SubagentStop check. Only the adversarial critic is required to leave a triage file."""
+    payload: dict = {}
     if not sys.stdin.isatty():
         try:
-            payload = json.loads(sys.stdin.read() or "{}")
+            parsed = json.loads(sys.stdin.read() or "{}")
+            payload = parsed if isinstance(parsed, dict) else {}
         except ValueError:
             payload = {}
-        agent = payload.get("agent_type") if isinstance(payload, dict) else None
+        agent = payload.get("agent_type")
         if isinstance(agent, str) and agent and CRITIC_AGENT not in agent:
             return EXIT_OK
     try:
-        path = worktree_root() / TRIAGE_FILE
+        path = worktree_root(hook_cwd(payload) if payload else None) / TRIAGE_FILE
     except FactoryError as exc:
         print(exc.message, file=sys.stderr)
         return EXIT_OK
@@ -63,12 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
     wt_init.add_argument("--hook", action="store_true",
                          help="Run as a WorktreeCreate hook: create the worktree named on stdin and print its path.")
 
-    sub.add_parser("guard", help="PreToolUse path guard (hook payload on stdin).")
+    p = sub.add_parser("guard", help="PreToolUse path guard (hook payload on stdin).")
+    p.add_argument("--platform", choices=PLATFORMS, default=None)
 
     p = sub.add_parser("fast-check", help="Run fast lint, type, and boundary checks.")
     p.add_argument("--hook", action="store_true", help="Report failures on stderr with exit 2 so the agent sees them.")
+    p.add_argument("--platform", choices=PLATFORMS, default=None)
 
-    sub.add_parser("holdout-gate", help="Run the sealed hold-out oracle against the candidate patch.")
+    p = sub.add_parser("holdout-gate", help="Run the sealed hold-out oracle against the candidate patch.")
+    p.add_argument("--platform", choices=PLATFORMS, default=None)
 
     p = sub.add_parser("status", help="Show worktree state and hold-out metrics.")
     p.add_argument("--json", action="store_true")
@@ -100,11 +106,11 @@ def dispatch(args: argparse.Namespace) -> int:
         print(root)
         return EXIT_OK
     if command == "guard":
-        return path_guard.main()
+        return path_guard.main(platform=args.platform)
     if command == "fast-check":
-        return fast_check.main(hook=args.hook)
+        return fast_check.main(hook=args.hook, platform=args.platform)
     if command == "holdout-gate":
-        return holdout_gate.main()
+        return holdout_gate.main(platform=args.platform)
     if command == "status":
         return status.main(as_json=args.json, watch=args.watch, compact=args.compact_summary)
     if command == "validate-triage-file":

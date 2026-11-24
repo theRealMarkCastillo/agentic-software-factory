@@ -60,6 +60,48 @@ def test_antigravity_field_names_are_blocked(seal):
     assert denied({"tool_name": "write_to_file", "tool_input": {"TargetFile": str(seal / "x")}})
 
 
+def test_antigravity_nested_toolcall_and_workspace_paths_are_blocked(home, seal, tmp_path, monkeypatch):
+    plugin_root = tmp_path / "plugin-root"
+    plugin_root.mkdir()
+    monkeypatch.chdir(plugin_root)
+    workspace = home / "git" / "project"
+    workspace.mkdir(parents=True)
+
+    assert denied({
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "cat ../../.factory-holdouts/demo-repo/suites/test_secret.py"}},
+        "workspacePaths": [str(workspace)],
+    })
+    assert denied({
+        "toolCall": {"name": "view_file", "args": {"AbsolutePath": str(seal / "demo-repo" / "suites" / "test_secret.py")}},
+        "workspacePaths": [str(workspace)],
+    })
+    assert denied({
+        "toolCall": {"name": "write_to_file", "args": {"TargetFile": str(workspace / ".factory-state.json")}},
+        "workspacePaths": [str(workspace)],
+    })
+    assert denied({
+        "toolCall": {"name": "grep_search", "args": {"SearchPath": str(home), "Query": "SECRET"}},
+        "workspacePaths": [str(workspace)],
+    })
+    assert not denied({
+        "toolCall": {"name": "view_file", "args": {"AbsolutePath": str(workspace / "README.md")}},
+        "workspacePaths": [str(workspace)],
+    })
+
+
+def test_antigravity_cli_deny_exits_0_with_deny_json(repo, seal, tmp_path):
+    plugin_root = tmp_path / "plugin-root"
+    plugin_root.mkdir()
+    payload = {
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "cat ~/.factory-holdouts/test.py"}},
+        "workspacePaths": [str(repo)],
+    }
+    result = run_cli(["guard", "--platform", "antigravity"], cwd=plugin_root, stdin=json.dumps(payload))
+    assert result.returncode == 0
+    assert result.stderr.startswith("BLOCKED by Factory Security Guard:")
+    assert json.loads(result.stdout) == {"decision": "deny", "reason": result.stderr.strip()}
+
+
 def test_nested_path_fields_are_blocked(seal):
     payload = {"tool_name": "MultiEdit", "tool_input": {"edits": [{"file_path": str(seal / "x.py")}]}}
     assert denied(payload)

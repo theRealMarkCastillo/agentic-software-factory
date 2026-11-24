@@ -180,6 +180,22 @@ def test_fast_check_hook_mode_reports_on_stderr_with_exit_2(repo):
     assert result.returncode == 2 and "FAST-CHECK FAILED" in result.stderr and result.stdout == ""
 
 
+def test_fast_check_antigravity_hook_resolves_workspace_from_plugin_root(repo, tmp_path):
+    plugin_root = tmp_path / "plugin-root"
+    plugin_root.mkdir()
+    make_checker(repo, "ruff", "echo 'E501 line too long'; exit 1")
+    payload = {
+        "toolCall": {"name": "write_to_file", "args": {"TargetFile": str(repo / "src" / "app.py")}},
+        "workspacePaths": [str(repo)],
+    }
+    result = run_cli(["fast-check", "--hook", "--platform", "antigravity"], cwd=plugin_root,
+                     env={"PATH": "/usr/bin:/bin"}, stdin=json.dumps(payload))
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {}
+    assert "FAST-CHECK FAILED: ruff" in result.stderr
+    assert fast_check.load_result(repo)["result"] == "failed: ruff"
+
+
 def test_fast_check_hook_skips_batches_without_edits(repo):
     make_checker(repo, "ruff", "exit 1")
     payload = {"hook_event_name": "PostToolBatch", "tool_calls": [{"tool_name": "Read"}, {"tool_name": "Grep"}]}
